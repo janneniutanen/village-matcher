@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Village Matcher</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Fraunces:wght@500;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="brand">
+    <span class="brand-mark">🌿</span>
+    <span class="brand-name">Village Matcher</span>
+  </div>
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="new-matches">New Matches</button>
+    <button class="tab-btn" data-tab="active-groups">Active Groups</button>
+    <button class="tab-btn" data-tab="templates-settings">Templates &amp; Settings</button>
+  </nav>
+</header>
+
+<div id="passwordGate" class="password-gate" hidden>
+  <div class="password-dialog">
+    <div class="password-brand">🌿 Village Matcher</div>
+    <p class="password-prompt">Enter the access password</p>
+    <input type="password" id="passwordInput" placeholder="Password" autocomplete="current-password">
+    <button id="passwordSubmitBtn" class="btn-primary">Unlock</button>
+    <p id="passwordError" class="password-error" hidden></p>
+  </div>
+</div>
+
+<main>
+
+  <section id="new-matches" class="tab-panel active">
+    <div class="controls-bar">
+      <button id="syncBtn" class="btn-secondary">↻ Sync with Google Sheet</button>
+      <div class="control-group">
+        <label>Max age gap: <span id="ageGapOut">6 months</span></label>
+        <input type="range" id="ageGapSlider" min="1" max="12" step="1" value="6">
+      </div>
+      <div class="control-group">
+        <label>Min group size</label>
+        <input type="number" id="minGroupSizeInput" min="2" max="10" value="3">
+      </div>
+      <div class="control-group">
+        <label>Max group size</label>
+        <input type="number" id="maxGroupSizeInput" min="2" max="10" value="4">
+      </div>
+      <div class="control-group">
+        <label>Neighborhood</label>
+        <select id="neighborhoodFilter"></select>
+      </div>
+      <button id="runMatchingBtn" class="btn-primary">▶ Run matching</button>
+    </div>
+
+    <div id="map"></div>
+    <div class="map-legend">
+      <span><i class="legend-dot legend-dot-solid"></i>in a group / candidate</span>
+      <span><i class="legend-dot legend-dot-dashed"></i>unmatched</span>
+    </div>
+
+    <h2 class="section-title">Candidate groups</h2>
+    <div id="candidateCards" class="card-list"></div>
+
+    <h2 class="section-title">Still unmatched</h2>
+    <div id="unmatchedList" class="mini-card-list"></div>
+
+    <h2 class="section-title">Needs attention (data issues)</h2>
+    <p class="hint">These rows have something the matching engine can't work with — usually a manually-edited cell in the sheet. They're excluded from matching until fixed.</p>
+    <div id="dataIssuesList" class="mini-card-list"></div>
+  </section>
+
+  <section id="active-groups" class="tab-panel">
+    <div id="needsReview" class="needs-review"></div>
+    <h2 class="section-title">Groups</h2>
+    <div id="activeGroups" class="card-list"></div>
+  </section>
+
+  <section id="templates-settings" class="tab-panel">
+    <h2 class="section-title">Message templates</h2>
+    <p class="hint">Write your own wording. Use any of these tokens and they'll be filled in automatically: <code>{{name}}</code> <code>{{neighborhood}}</code> <code>{{baby_month}}</code> <code>{{group_members}}</code> <code>{{age_range}}</code></p>
+
+    <label class="field-label">First contact</label>
+    <textarea id="templateFirstContact" rows="3" placeholder="e.g. Hi {{name}}! I think you'd be a great fit for a village group in {{neighborhood}}..."></textarea>
+
+    <label class="field-label">Confirmation ask</label>
+    <textarea id="templateConfirmation" rows="3" placeholder="e.g. Great! I'm putting together a group with {{group_members}}..."></textarea>
+
+    <label class="field-label">Introduction</label>
+    <textarea id="templateIntroduction" rows="3" placeholder="e.g. Meet your village! {{group_members}}..."></textarea>
+
+    <h2 class="section-title">Connection</h2>
+    <div class="controls-bar" style="border-bottom:none; padding-bottom:0;">
+      <button id="testBackendBtn" class="btn-secondary">Test connection</button>
+      <span id="backendStatus" class="hint"></span>
+    </div>
+    <h2 class="section-title">Settings</h2>
+    <div class="settings-grid">
+      <div class="control-group">
+        <label>Default max age gap (months)</label>
+        <input type="number" id="settingMaxAgeGap" min="1" max="24" value="6">
+      </div>
+      <div class="control-group">
+        <label>Default min group size</label>
+        <input type="number" id="settingMinSize" min="2" max="10" value="3">
+      </div>
+      <div class="control-group">
+        <label>Default max group size</label>
+        <input type="number" id="settingMaxSize" min="2" max="10" value="4">
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="src/matching-engine.js"></script>
+<script src="src/validation.js"></script>
+<script src="src/mock-data.js"></script>
+<script src="src/app.js"></script>
+</body>
+</html>

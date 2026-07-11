@@ -1,0 +1,804 @@
+// Village Matcher — browser UI
+//
+// Talks to the Netlify Function at /.netlify/functions/api for all
+// backend operations (Google Sheets read/write, geocoding, travel time,
+// isochrones). A password stored in localStorage is sent as
+// X-Matcher-Password on every request.
+//
+// For local development against local-test-server.js, append
+// ?backend=http://localhost:8791 to the page URL.
+
+const API_URL     = new URLSearchParams(location.search).get('backend') || '/.netlify/functions/api';
+const PASSWORD_KEY = 'matcherPassword';
+
+function getPassword() { return localStorage.getItem(PASSWORD_KEY) || ''; }
+function setPassword(p) { localStorage.setItem(PASSWORD_KEY, p); }
+
+async function callBackend(action, payload) {
+  let resp;
+  try {
+    resp = await fetch(API_URL, {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json', 'X-Matcher-Password': getPassword() },
+      body:    JSON.stringify({ action, ...payload }),
+    });
+  } catch (netErr) {
+    throw new Error(netErr.message || 'Network error — check your internet connection');
+  }
+
+  if (resp.status === 401) {
+    const err = new Error('Incorrect password or session expired.');
+    err.code  = 'UNAUTHORIZED';
+    throw err;
+  }
+
+  let data;
+  try {
+    data = await resp.json();
+  } catch {
+    throw new Error(`Unexpected response (HTTP ${resp.status})`);
+  }
+
+  if (!data.ok) throw new Error(data.error || 'Backend error');
+  return data.result;
+}
+
+function cacheGet(key) {
+  try { return JSON.parse(localStorage.getItem(key)); } catch { return null; }
+}
+function cacheSet(key, value) {
+  try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage full */ }
+}
+
+// Fire-and-forget backend write. Local state is updated immediately so the
+// UI never waits on a network round trip.
+function syncToBackend(action, payload) {
+  callBackend(action, payload).catch((err) => {
+    if (err.code === 'UNAUTHORIZED') { showPasswordGate('Session expired — please re-enter the password.'); return; }
+    console.warn(`Backend sync failed (${action}):`, err.message);
+  });
+}
+
+async function loadFromBackend() {
+  try {
+    const [applicants, groups, templates, settings] = await Promise.all([
+      callBackend('getApplicants', {}),
+      callBackend('getGroups', {}),
+      callBackend('getTemplates', {}),
+      callBackend('getSettings', {}),
+    ]);
+    const prevById = Object.fromEntries(state.applicants.map((a) => [a.id, a]));
+    state.applicants = applicants.map((a) => {
+      const prev = prevById[a.id];
+      return {
+        ...a,
+        coords:       prev?.geocodedReal ? prev.coords : [60.1699 + (Math.random() - 0.5) * 0.05, 24.9384 + (Math.random() - 0.5) * 0.1],
+        geocodedReal: prev?.geocodedReal || false,
+      };
+    });
+    await ensureGeocoded(state.applicants);
+    state.groups    = groups;
+    state.templates = { ...state.templates, ...templates };
+    if (settings.maxAgeGap)    state.settings.maxAgeGap    = Number(settings.maxAgeGap);
+    if (settings.minGroupSize) state.settings.minGroupSize = Number(settings.minGroupSize);
+    if (settings.maxGroupSize) state.settings.maxGroupSize = Number(settings.maxGroupSize);
+    const maxNum = Math.max(0, ...groups.map((g) => Number((g.id || '').replace('G-', '')) || 0));
+    state.nextGroupNum     = maxNum + 1;
+    state.usingBackendData = true;
+    return true;
+  } catch (err) {
+    if (err.code === 'UNAUTHORIZED') {
+      showPasswordGate('Session expired — please re-enter the password.');
+      return false;
+    }
+    console.warn('Loading from backend failed:', err.message);
+    state.usingBackendData = false;
+    return false;
+  }
+}
+
+const state = {
+  applicants:       [],
+  groups:           [],
+  candidateGroups:  [],
+  templates:        { firstContact: '', confirmationAsk: '', introduction: '' },
+  settings: {
+    maxAgeGap:          6,
+    minGroupSize:       3,
+    maxGroupSize:       4,
+    neighborhoodFilter: 'all',
+  },
+  activeTab:         'new-matches',
+  overlapVisibleFor: null,
+  nextGroupNum:      1,
+  usingBackendData:  false,
+};
+
+// ---------------------------------------------------------------------------
+// Travel time: cache + backend, falling back to MatchingEngine estimates
+// ---------------------------------------------------------------------------
+
+function travelCacheKey(idA, idB, mode) {
+  const [x, y] = [idA, idB].sort();
+  return `travel:${x}:${y}:${mode}`;
+}
+
+function getTravelMinutes(a, b, mode) {
+  const key    = travelCacheKey(a.id, b.id, mode);
+  const cached = cacheGet(key);
+  if (cached && typeof cached.minutes === 'number') return cached.minutes;
+  return MatchingEngine.estimateTravelTime(MatchingEngine.haversineKm(a.coords, b.coords), mode);
+}
+
+async function ensureGeocoded(applicants) {
+  const missing = applicants.filter((a) => !a.geocodedReal);
+  if (missing.length === 0) return;
+
+  const toFetch = [];
+  missing.forEach((a) => {
+    const cacheKey = 'geocode:' + a.street + ', ' + a.neighborhood;
+    const cached   = cacheGet(cacheKey);
+    if (cached && typeof cached.lat === 'number') {
+      a.coords      = [cached.lat, cached.lon];
+      a.geocodedReal = true;
+    } else {
+      toFetch.push(a);
+    }
+  });
+  if (toFetch.length === 0) return;
+
+  try {
+    const addresses = toFetch.map((a) => `${a.street}, ${a.neighborhood}, Finland`);
+    const results   = await callBackend('geocode', { addresses });
+    results.forEach((r, i) => {
+      const a = toFetch[i];
+      if (typeof r.lat === 'number') {
+        a.coords      = [r.lat, r.lon];
+        a.geocodedReal = true;
+        cacheSet('geocode:' + a.street + ', ' + a.neighborhood, r);
+      }
+    });
+  } catch (err) {
+    console.warn('Geocoding failed, using approximate coordinates:', err.message);
+  }
+}
+
+async function ensureTravelTimes(pairsNeeded) {
+  if (pairsNeeded.length === 0) return;
+
+  const toFetch = pairsNeeded
+    .filter(({ a, b, mode }) => !cacheGet(travelCacheKey(a.id, b.id, mode)))
+    .map(({ a, b, mode }) => ({
+      id:   travelCacheKey(a.id, b.id, mode),
+      from: { lat: a.coords[0], lon: a.coords[1] },
+      to:   { lat: b.coords[0], lon: b.coords[1] },
+      mode,
+    }));
+  if (toFetch.length === 0) return;
+
+  try {
+    const results = await callBackend('travelTime', { pairs: toFetch });
+    results.forEach((r) => {
+      if (typeof r.minutes === 'number') cacheSet(r.id, { minutes: r.minutes });
+    });
+  } catch (err) {
+    console.warn('Travel-time backend call failed, falling back to estimates:', err.message);
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Matching engine orchestration
+// ---------------------------------------------------------------------------
+
+async function computeCandidateGroups() {
+  const pool = state.applicants.filter(
+    (a) =>
+      a.matchStatus === 'unmatched' &&
+      a.eligibleForMatching &&
+      (state.settings.neighborhoodFilter === 'all' || a.neighborhood === state.settings.neighborhoodFilter)
+  );
+
+  const pairsNeeded = [];
+  for (let i = 0; i < pool.length; i++) {
+    for (let j = i + 1; j < pool.length; j++) {
+      const a = pool[i], b = pool[j];
+      const modes = MatchingEngine.sharedModes(a, b);
+      if (modes.length === 0) continue;
+      const distanceKm  = MatchingEngine.haversineKm(a.coords, b.coords);
+      const bestSpeed   = Math.max(...modes.map((m) => MatchingEngine.MODE_MODEL[m].speedKmh));
+      const roughCapKm  = (Math.min(a.maxTravel, b.maxTravel) / 60) * bestSpeed * 1.5;
+      if (distanceKm > roughCapKm) continue;
+      modes.forEach((mode) => pairsNeeded.push({ a, b, mode }));
+    }
+  }
+  await ensureTravelTimes(pairsNeeded);
+
+  const groups = MatchingEngine.clusterGroups(pool, state.settings, getTravelMinutes);
+  return groups.map((group, i) => ({
+    candidateId: 'cand-' + i,
+    memberIds:   group.map((m) => m.id),
+    name:        `${MatchingEngine.mostCommonNeighborhood(group)} · ${MatchingEngine.groupAgeRangeLabel(group)} · ${group.length} moms`,
+  }));
+}
+
+function findReplacementCandidates(group) {
+  const members = group.memberIds.map((id) => getApplicant(id));
+  const pool    = state.applicants.filter((a) => a.matchStatus === 'unmatched' && a.eligibleForMatching);
+  return MatchingEngine.findReplacementCandidates(members, pool, state.settings, getTravelMinutes);
+}
+
+// ---------------------------------------------------------------------------
+// Data mutations
+// ---------------------------------------------------------------------------
+
+function getApplicant(id) { return state.applicants.find((a) => a.id === id); }
+
+async function approveGroup(candidateId) {
+  const cand = state.candidateGroups.find((c) => c.candidateId === candidateId);
+  if (!cand) return;
+  const name = cand.name.replace(/ · \d+ moms$/, '');
+
+  let groupId;
+  try {
+    const result = await callBackend('createGroup', { group: { name, memberIds: cand.memberIds, status: 'open' } });
+    groupId = result.id;
+  } catch (err) {
+    if (err.code === 'UNAUTHORIZED') { showPasswordGate(); return; }
+    console.warn('Creating group on backend failed, using local id:', err.message);
+  }
+  if (!groupId) groupId = 'G-' + String(state.nextGroupNum++).padStart(3, '0');
+
+  const group = { id: groupId, name, memberIds: cand.memberIds, status: 'open', created: new Date().toISOString() };
+  state.groups.push(group);
+  cand.memberIds.forEach((id) => {
+    const a = getApplicant(id);
+    a.matchStatus  = 'match_found';
+    a.matchGroupId = groupId;
+    syncToBackend('updateApplicant', { id, fields: { matchStatus: 'match_found', matchGroupId: groupId } });
+  });
+  state.candidateGroups = state.candidateGroups.filter((c) => c.candidateId !== candidateId);
+  renderAll();
+}
+
+function rejectGroup(candidateId) {
+  state.candidateGroups = state.candidateGroups.filter((c) => c.candidateId !== candidateId);
+  renderAll();
+}
+
+function markStatus(applicantId, status) {
+  const a = getApplicant(applicantId);
+  a.matchStatus = status;
+  syncToBackend('updateApplicant', { id: applicantId, fields: { matchStatus: status } });
+  if (status === 'confirmed' || status === 'introduced') {
+    const group = state.groups.find((g) => g.id === a.matchGroupId);
+    if (group) {
+      group.status = 'established';
+      syncToBackend('updateGroup', { id: group.id, fields: { status: 'established' } });
+    }
+  }
+  renderAll();
+}
+
+function assignReplacement(groupId, applicantId) {
+  const group = state.groups.find((g) => g.id === groupId);
+  if (!group) return;
+  group.memberIds.push(applicantId);
+  const a = getApplicant(applicantId);
+  a.matchStatus  = 'match_found';
+  a.matchGroupId = groupId;
+  syncToBackend('updateApplicant', { id: applicantId, fields: { matchStatus: 'match_found', matchGroupId: groupId } });
+  syncToBackend('updateGroup', { id: groupId, fields: { memberIds: group.memberIds } });
+  renderAll();
+}
+
+// ---------------------------------------------------------------------------
+// WhatsApp helpers
+// ---------------------------------------------------------------------------
+
+function fillTemplate(template, applicant, group) {
+  if (!template) return `Hi ${applicant.name}! This is a message from your village organizer.`;
+  const groupMembers = group ? group.memberIds.map((id) => getApplicant(id).name).join(', ') : '';
+  return template
+    .replaceAll('{{name}}',          applicant.name)
+    .replaceAll('{{neighborhood}}',  applicant.neighborhood)
+    .replaceAll('{{baby_month}}',    MatchingEngine.formatMonthYear(applicant.dob))
+    .replaceAll('{{group_members}}', groupMembers)
+    .replaceAll('{{age_range}}',     group ? MatchingEngine.groupAgeRangeLabel(group.memberIds.map((id) => getApplicant(id))) : '');
+}
+
+function waLink(applicant, template, group) {
+  const digits = applicant.phone.replace(/[^\d]/g, '');
+  const text   = encodeURIComponent(fillTemplate(template, applicant, group));
+  return `https://wa.me/${digits}?text=${text}`;
+}
+
+function stageTemplateFor(status) {
+  if (status === 'unmatched' || status === 'match_found') return state.templates.firstContact;
+  if (status === 'contacted') return state.templates.confirmationAsk;
+  return state.templates.introduction;
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+function escHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
+}
+
+let map, overlapLayer, pinLayer;
+
+function initMap() {
+  map = L.map('map', { zoomControl: false, attributionControl: false }).setView([60.185, 24.93], 12);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
+  overlapLayer = L.layerGroup().addTo(map);
+  pinLayer     = L.layerGroup().addTo(map);
+}
+
+const GROUP_COLORS = ['#3F6C51', '#C1622D', '#5B6EC9', '#B0447A', '#3F8F8F', '#8A7A3F'];
+
+function colorForGroup(groupId) {
+  if (!groupId) return null;
+  const idx = state.groups.findIndex((g) => g.id === groupId);
+  return GROUP_COLORS[idx % GROUP_COLORS.length];
+}
+
+function candidateColor(candidateId) {
+  const idx = state.candidateGroups.findIndex((c) => c.candidateId === candidateId);
+  return GROUP_COLORS[idx % GROUP_COLORS.length];
+}
+
+function applicantCandidateColor(applicantId) {
+  const cand = state.candidateGroups.find((c) => c.memberIds.includes(applicantId));
+  return cand ? candidateColor(cand.candidateId) : null;
+}
+
+function renderMap() {
+  pinLayer.clearLayers();
+  state.applicants
+    .filter((a) => !a.hasDataIssues)
+    .forEach((a) => {
+      const groupColor = colorForGroup(a.matchGroupId) || applicantCandidateColor(a.id);
+      const isMatched  = !!groupColor;
+      const marker = L.circleMarker(a.coords, {
+        radius: 9, color: isMatched ? groupColor : '#8A8577', weight: 2,
+        fillColor: isMatched ? groupColor : '#FAF9F6',
+        fillOpacity: isMatched ? 0.9 : 0.5, dashArray: isMatched ? null : '3,2',
+      }).addTo(pinLayer);
+
+      const groupName = a.matchGroupId
+        ? escHtml(state.groups.find((g) => g.id === a.matchGroupId)?.name ?? '')
+        : '';
+      marker.bindPopup(
+        `<strong>${escHtml(a.id)}</strong><br/>`+
+        `${escHtml(a.name)}<br/>`+
+        `${escHtml(a.street + ", " + a.neighborhood)}<br>` +
+        `${a.language.map(escHtml).join(', ')}<br>` +
+        `${a.transport.map(escHtml).join('')} ${a.maxTravel}<br>` +
+        `${a.matchGroupId ? 'Group: ' + groupName : 'Status: ' + escHtml(a.matchStatus)}`
+      );
+    });
+}
+
+async function drawOverlap(candidateId) {
+  overlapLayer.clearLayers();
+  if (!candidateId) return;
+  const cand = state.candidateGroups.find((c) => c.candidateId === candidateId);
+  if (!cand) return;
+  const members = cand.memberIds.map(getApplicant);
+  const color   = candidateColor(candidateId);
+
+  const commonModes = members.reduce((acc, m) => acc.filter((mode) => m.transport.includes(mode)), ['car', 'walk']);
+  const mode        = commonModes.includes('car') ? 'car' : commonModes.includes('walk') ? 'walk' : null;
+
+  if (mode && members.length <= 5) {
+    try {
+      const minutes   = Math.min(...members.map((m) => m.maxTravel));
+      const locations = members.map((m) => ({ lat: m.coords[0], lon: m.coords[1] }));
+      const geojson   = await callBackend('isochrone', { locations, mode, minutes });
+      L.geoJSON(geojson, { style: { color, weight: 1, fillColor: color, fillOpacity: 0.15 } }).addTo(overlapLayer);
+      return;
+    } catch (err) {
+      console.warn('Isochrone call failed, falling back to radius circles:', err.message);
+    }
+  }
+
+  members.forEach((a) => {
+    const bestSpeed = Math.max(...a.transport.map((m) => MatchingEngine.MODE_MODEL[m].speedKmh));
+    const radiusKm  = (a.maxTravel / 60) * bestSpeed;
+    L.circle(a.coords, { radius: radiusKm * 1000, color, weight: 1, fillColor: color, fillOpacity: 0.12 }).addTo(overlapLayer);
+  });
+}
+
+const FLAG_MAP = { English: '🇬🇧', Finnish: '🇫🇮', Swedish: '🇸🇪', Russian: '🇷🇺', Arabic: '🇸🇦', French: '🇫🇷', Swahili: '🇰🇪' };
+const MODE_ICON = { bus: '🚌', car: '🚙', walk: '🚶' };
+
+function codedLine(a) {
+  const flags = a.language.map((l) => FLAG_MAP[l] || escHtml(l)).join('');
+  const modes = a.transport.map((m) => MODE_ICON[m] || escHtml(m)).join('');
+  return `${escHtml(a.name)} ${flags} ${MatchingEngine.formatMonthYear(a.dob)} ${modes}${a.maxTravel}`;
+}
+
+function renderCandidateCards() {
+  const container = document.getElementById('candidateCards');
+  container.innerHTML = '';
+  if (state.candidateGroups.length === 0) {
+    container.innerHTML = `<div class="empty-state">No candidate groups yet. Adjust the filters above and click "Run matching."</div>`;
+    return;
+  }
+  state.candidateGroups.forEach((cand) => {
+    const members = cand.memberIds.map(getApplicant);
+    const card    = document.createElement('div');
+    card.className = 'card';
+    card.innerHTML = `
+      <div class="card-header">
+        <span class="card-title">${escHtml(cand.name)}</span>
+        <span class="badge badge-pending">pending</span>
+      </div>
+      <div class="coded-lines">${members.map((m) => codedLine(m)).join('<br>')}</div>
+      <div class="card-actions">
+        <button data-action="approve" data-id="${escHtml(cand.candidateId)}">Approve</button>
+        <button data-action="reject"  data-id="${escHtml(cand.candidateId)}">Reject</button>
+        <button data-action="overlap" data-id="${escHtml(cand.candidateId)}">View overlap on map</button>
+      </div>`;
+    container.appendChild(card);
+  });
+
+  container.querySelectorAll('button').forEach((btn) => {
+    btn.addEventListener('click', async () => {
+      if (btn.disabled) return;
+      const id = btn.dataset.id;
+      if (btn.dataset.action === 'approve') { btn.disabled = true; await approveGroup(id); btn.disabled = false; }
+      if (btn.dataset.action === 'reject')   rejectGroup(id);
+      if (btn.dataset.action === 'overlap') {
+        state.overlapVisibleFor = state.overlapVisibleFor === id ? null : id;
+        await drawOverlap(state.overlapVisibleFor);
+      }
+    });
+  });
+}
+
+function renderUnmatchedList() {
+  const container = document.getElementById('unmatchedList');
+  const unmatched = state.applicants.filter((a) => a.matchStatus === 'unmatched' && !a.hasDataIssues);
+  const detailRow = (label, value) => value || value === 0
+    ? `<div><strong>${label}</strong><span>${escHtml(value)}</span></div>`
+    : '';
+
+  container.innerHTML = unmatched.length
+    ? unmatched.map((a) => `
+      <div class="mini-card unmatched-card">
+        <div class="unmatched-summary">
+          <button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.id)}</button>
+          <span>${escHtml(a.name)} · ${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span>
+          <span>${escHtml(a.coords)}</span>
+        </div>
+        <div class="applicant-details" hidden>
+          ${detailRow('Name', a.name)}
+          ${detailRow('Phone', a.phone)}
+          ${detailRow('Baby DOB', MatchingEngine.formatMonthYear(a.dob))}
+          ${detailRow('Languages', a.language.join(', '))}
+          ${detailRow('Transport', `${a.transport.join('')} ${a.maxTravel}`)}
+          ${detailRow('Address', `${a.street}, ${a.neighborhood}`)}
+          ${detailRow('Children', a.amountOfChildren)}
+          ${detailRow('Older sibling', a.olderSiblingBirthMonth)}
+          ${detailRow('Hopes', a.hopes)}
+          ${detailRow('Worries', a.worries)}
+          ${detailRow('Questions', a.questions)}
+          ${detailRow('Source', a.source)}
+        </div>
+      </div>`).join('')
+    : `<div class="empty-state">Everyone currently in the pool is either matched or pending approval.</div>`;
+
+  container.querySelectorAll('.id-toggle').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const details = btn.closest('.unmatched-card').querySelector('.applicant-details');
+      const isOpen  = !details.hidden;
+      details.hidden = isOpen;
+      btn.setAttribute('aria-expanded', String(!isOpen));
+    });
+  });
+}
+
+function statusStepper(current) {
+  const stages = ['unmatched', 'match_found', 'contacted', 'confirmed', 'introduced'];
+  const idx    = stages.indexOf(current);
+  return `<div class="stepper">${stages.map((s, i) => `<span class="step ${i <= idx ? 'step-done' : ''} ${i === idx ? 'step-current' : ''}">${s}</span>`).join('')}</div>`;
+}
+
+function renderActiveGroups() {
+  const container      = document.getElementById('activeGroups');
+  const reviewContainer = document.getElementById('needsReview');
+
+  const declined = state.applicants.filter((a) => a.matchStatus === 'declined');
+  reviewContainer.style.display = declined.length ? 'block' : 'none';
+  reviewContainer.innerHTML = declined.length
+    ? `<div class="review-title">Needs review</div>` +
+      declined.map((a) => {
+        const groupName = escHtml(state.groups.find((g) => g.id === a.matchGroupId)?.name || 'no group');
+        return `<div class="mini-card review-item"><span>${escHtml(a.name)} declined · was in ${groupName}</span><button data-action="reset" data-id="${escHtml(a.id)}">Reset to unmatched</button></div>`;
+      }).join('')
+    : '';
+
+  container.innerHTML = '';
+  if (state.groups.length === 0) {
+    container.innerHTML = `<div class="empty-state">No groups formed yet — approve candidates in the New Matches tab.</div>`;
+  }
+  state.groups.forEach((group) => {
+    const members = group.memberIds.map(getApplicant);
+    const el      = document.createElement('div');
+    el.className  = 'card';
+    const missing = state.settings.minGroupSize - members.length;
+    el.innerHTML = `
+      <div class="card-header">
+        <span class="card-title">${escHtml(group.name)} · ${members.length} moms</span>
+        <span class="badge ${group.status === 'established' ? 'badge-established' : 'badge-open'}">${escHtml(group.status)}</span>
+      </div>
+      ${members.map((m) => `
+        <div class="member-row">
+          <div class="coded-lines">${codedLine(m)}</div>
+          ${statusStepper(m.matchStatus)}
+          <div class="member-actions">
+            <a class="wa-link" rel="noopener noreferrer" target="_blank" href="${waLink(m, stageTemplateFor(m.matchStatus), group)}">Message on WhatsApp</a>
+            <button data-action="advance" data-id="${escHtml(m.id)}">Advance stage</button>
+            <button data-action="decline" data-id="${escHtml(m.id)}">Mark declined</button>
+          </div>
+        </div>`).join('')}
+      <div class="card-actions">
+        <button data-action="copy" data-id="${escHtml(group.id)}">Copy phone numbers</button>
+        ${group.status === 'established' && missing > 0
+          ? `<button data-action="suggest" data-id="${escHtml(group.id)}">Suggest replacement (${missing} needed)</button>`
+          : ''}
+      </div>
+      <div class="replacement-suggestions" id="suggestions-${escHtml(group.id)}"></div>`;
+    container.appendChild(el);
+  });
+
+  container.querySelectorAll('button').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const id = btn.dataset.id;
+      if (btn.dataset.action === 'advance') {
+        const stages = ['unmatched', 'match_found', 'contacted', 'confirmed', 'introduced'];
+        const a      = getApplicant(id);
+        const idx    = stages.indexOf(a.matchStatus);
+        if (idx === -1 || idx === stages.length - 1) return;
+        markStatus(id, stages[idx + 1]);
+      }
+      if (btn.dataset.action === 'decline') markStatus(id, 'declined');
+      if (btn.dataset.action === 'copy') {
+        const group   = state.groups.find((g) => g.id === id);
+        const numbers = group.memberIds.map((mid) => getApplicant(mid).phone).join(', ');
+        navigator.clipboard?.writeText(numbers).catch(() => {});
+        btn.textContent = 'Copied!';
+        setTimeout(() => (btn.textContent = 'Copy phone numbers'), 1500);
+      }
+      if (btn.dataset.action === 'suggest') {
+        const group       = state.groups.find((g) => g.id === id);
+        const suggestions = findReplacementCandidates(group);
+        const box         = document.getElementById(`suggestions-${id}`);
+        box.innerHTML = suggestions.length
+          ? suggestions.map((s) => `<div class="mini-card"><span>${codedLine(s)}</span><button data-action="assign" data-group="${escHtml(id)}" data-id="${escHtml(s.id)}">Add to group</button></div>`).join('')
+          : `<div class="empty-state">No one in the unmatched pool currently fits this group.</div>`;
+        box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => assignReplacement(b.dataset.group, b.dataset.id)));
+      }
+    });
+  });
+
+  reviewContainer.querySelectorAll('button').forEach((btn) => {
+    btn.addEventListener('click', () => markStatus(btn.dataset.id, 'unmatched'));
+  });
+}
+
+function renderDataIssues() {
+  const container = document.getElementById('dataIssuesList');
+  const flagged   = state.applicants.filter((a) => a.hasDataIssues);
+  container.innerHTML = flagged.length
+    ? flagged.map((a) => `<div class="mini-card issue-card"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}) — ${a.dataIssues.map(escHtml).join('; ')}</span></div>`).join('')
+    : `<div class="empty-state">No data issues found in the current sheet.</div>`;
+}
+
+function renderSettingsTab() {
+  document.getElementById('templateFirstContact').value = state.templates.firstContact;
+  document.getElementById('templateConfirmation').value = state.templates.confirmationAsk;
+  document.getElementById('templateIntroduction').value = state.templates.introduction;
+  document.getElementById('settingMaxAgeGap').value     = state.settings.maxAgeGap;
+  document.getElementById('settingMinSize').value       = state.settings.minGroupSize;
+  document.getElementById('settingMaxSize').value       = state.settings.maxGroupSize;
+}
+
+function populateNeighborhoodFilter() {
+  const select        = document.getElementById('neighborhoodFilter');
+  const neighborhoods = [...new Set(state.applicants.filter((a) => !a.hasDataIssues).map((a) => a.neighborhood))];
+  select.innerHTML =
+    `<option value="all">All neighborhoods</option>` +
+    neighborhoods.map((n) => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('');
+}
+
+function renderAll() {
+  renderMap();
+  renderCandidateCards();
+  renderUnmatchedList();
+  renderDataIssues();
+  renderActiveGroups();
+}
+
+// ---------------------------------------------------------------------------
+// Password gate
+// ---------------------------------------------------------------------------
+
+function showPasswordGate(message) {
+  const gate  = document.getElementById('passwordGate');
+  const error = document.getElementById('passwordError');
+  gate.hidden = false;
+  document.getElementById('passwordInput').value = '';
+  if (message) { error.textContent = message; error.hidden = false; }
+  else          { error.hidden = true; }
+  document.getElementById('passwordInput').focus();
+}
+
+function hidePasswordGate() {
+  document.getElementById('passwordGate').hidden = true;
+}
+
+async function attemptUnlock() {
+  const input  = document.getElementById('passwordInput');
+  const error  = document.getElementById('passwordError');
+  const btn    = document.getElementById('passwordSubmitBtn');
+  const pw     = input.value;
+
+  btn.disabled    = true;
+  btn.textContent = 'Checking…';
+  error.hidden    = true;
+
+  // Temporarily store the candidate password so callBackend can send it
+  setPassword(pw);
+
+  try {
+    await callBackend('ping', {});
+    hidePasswordGate();
+    await loadFromBackend();
+    populateNeighborhoodFilter();
+    renderSettingsTab();
+    renderAll();
+  } catch (err) {
+    if (err.code === 'UNAUTHORIZED') localStorage.removeItem(PASSWORD_KEY);
+    error.textContent = err.code === 'UNAUTHORIZED'
+      ? 'Incorrect password — try again.'
+      : 'Cannot connect to server. Check your internet connection.';
+    error.hidden = false;
+  } finally {
+    btn.disabled    = false;
+    btn.textContent = 'Unlock';
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tab + control wiring
+// ---------------------------------------------------------------------------
+
+function switchTab(tabId) {
+  state.activeTab = tabId;
+  document.querySelectorAll('.tab-panel').forEach((el) => el.classList.toggle('active', el.id === tabId));
+  document.querySelectorAll('.tab-btn').forEach((el)   => el.classList.toggle('active', el.dataset.tab === tabId));
+  if (tabId === 'new-matches') setTimeout(() => map.invalidateSize(), 50);
+}
+
+function wireControls() {
+  document.querySelectorAll('.tab-btn').forEach((btn) => btn.addEventListener('click', () => switchTab(btn.dataset.tab)));
+
+  document.getElementById('ageGapSlider').addEventListener('input', (e) => {
+    state.settings.maxAgeGap = Number(e.target.value);
+    document.getElementById('ageGapOut').textContent = `${e.target.value} months`;
+  });
+  document.getElementById('neighborhoodFilter').addEventListener('change', (e) => {
+    state.settings.neighborhoodFilter = e.target.value;
+  });
+  document.getElementById('runMatchingBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('runMatchingBtn');
+    btn.disabled = true; btn.textContent = 'Calculating…';
+    try {
+      state.candidateGroups = await computeCandidateGroups();
+    } catch (err) {
+      alert('Matching couldn\'t complete: ' + err.message);
+    }
+    state.overlapVisibleFor = null;
+    overlapLayer.clearLayers();
+    renderAll();
+    btn.disabled = false; btn.textContent = '▶ Run matching';
+  });
+
+  document.getElementById('minGroupSizeInput').addEventListener('change', (e) => {
+    const val = Math.min(Number(e.target.value), state.settings.maxGroupSize);
+    e.target.value = val; state.settings.minGroupSize = val;
+  });
+  document.getElementById('maxGroupSizeInput').addEventListener('change', (e) => {
+    const val = Math.max(Number(e.target.value), state.settings.minGroupSize);
+    e.target.value = val; state.settings.maxGroupSize = val;
+  });
+
+  document.getElementById('templateFirstContact').addEventListener('input', (e) => (state.templates.firstContact   = e.target.value));
+  document.getElementById('templateConfirmation').addEventListener('input', (e) => (state.templates.confirmationAsk = e.target.value));
+  document.getElementById('templateIntroduction').addEventListener('input', (e) => (state.templates.introduction    = e.target.value));
+  ['templateFirstContact', 'templateConfirmation', 'templateIntroduction'].forEach((id) => {
+    document.getElementById(id).addEventListener('blur', () => syncToBackend('saveTemplates', { templates: state.templates }));
+  });
+
+  document.getElementById('settingMaxAgeGap').addEventListener('change', (e) => {
+    state.settings.maxAgeGap = Number(e.target.value);
+    document.getElementById('ageGapSlider').value = e.target.value;
+    document.getElementById('ageGapOut').textContent = `${e.target.value} months`;
+    syncToBackend('saveSettings', { settings: { maxAgeGap: state.settings.maxAgeGap } });
+  });
+  document.getElementById('settingMinSize').addEventListener('change', (e) => {
+    const val = Math.min(Number(e.target.value), state.settings.maxGroupSize);
+    e.target.value = val; state.settings.minGroupSize = val;
+    document.getElementById('minGroupSizeInput').value = val;
+    syncToBackend('saveSettings', { settings: { minGroupSize: val } });
+  });
+  document.getElementById('settingMaxSize').addEventListener('change', (e) => {
+    const val = Math.max(Number(e.target.value), state.settings.minGroupSize);
+    e.target.value = val; state.settings.maxGroupSize = val;
+    document.getElementById('maxGroupSizeInput').value = val;
+    syncToBackend('saveSettings', { settings: { maxGroupSize: val } });
+  });
+
+  document.getElementById('testBackendBtn').addEventListener('click', async () => {
+    const status = document.getElementById('backendStatus');
+    status.textContent = 'Testing…';
+    try {
+      const result = await callBackend('ping', {});
+      status.textContent = `✓ Connected — sheet tab: ${result.sourceTab || '?'}, server time: ${result.time}`;
+    } catch (err) {
+      status.textContent = '✗ ' + err.message;
+    }
+  });
+
+  document.getElementById('syncBtn').addEventListener('click', async () => {
+    const btn = document.getElementById('syncBtn');
+    btn.disabled = true; btn.textContent = 'Syncing…';
+    const success = await loadFromBackend();
+    populateNeighborhoodFilter();
+    renderSettingsTab();
+    renderAll();
+    btn.disabled = false; btn.textContent = '↻ Sync with Google Sheet';
+    if (!success) alert('Sync failed — check your connection and try again.');
+  });
+
+  // Password gate submit (button click + Enter key)
+  document.getElementById('passwordSubmitBtn').addEventListener('click', attemptUnlock);
+  document.getElementById('passwordInput').addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') attemptUnlock();
+  });
+}
+
+async function init() {
+  initMap();
+  wireControls();
+
+  const stored = getPassword();
+  if (!stored) {
+    showPasswordGate();
+    return;
+  }
+
+  // Verify stored password is still valid
+  try {
+    await callBackend('ping', {});
+  } catch (err) {
+    if (err.code === 'UNAUTHORIZED') {
+      localStorage.removeItem(PASSWORD_KEY);
+      showPasswordGate('Password has changed — please re-enter.');
+      return;
+    }
+    // Network error: proceed anyway, user will see errors on sync
+  }
+
+  await loadFromBackend();
+  populateNeighborhoodFilter();
+  renderSettingsTab();
+  renderAll();
+}
+
+document.addEventListener('DOMContentLoaded', init);

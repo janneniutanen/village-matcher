@@ -1,0 +1,17 @@
+{
+  "name": "village-matcher",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Support-group matching tool for new mothers in Helsinki",
+  "scripts": {
+    "test": "node --test tests/matching-engine.test.js tests/validation.test.js",
+    "test:ui": "node --test tests/ui-smoke.test.js",
+    "serve": "node local-test-server.js"
+  },
+  "dependencies": {
+    "googleapis": "^144.0.0"
+  },
+  "devDependencies": {
+    "jsdom": "^24.0.0"
+  }
+}

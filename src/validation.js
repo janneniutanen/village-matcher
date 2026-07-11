@@ -1,0 +1,211 @@
+// ============================================================================
+// Village Matcher — input validation
+//
+// The sheet is hand-editable, so any field can end up malformed: a typo'd
+// transport mode, a date pasted in the wrong format, a phone number missing
+// digits, a blank cell. None of that should crash the matching engine or
+// silently produce wrong groups — it should get flagged so the organizer can
+// fix the sheet, and the person stays out of the matching pool until then.
+//
+// Pure functions, no DOM — testable the same way as matching-engine.js.
+// ============================================================================
+
+const KNOWN_MODES = {
+  walk: "W", walking: "W", foot: "W", "on foot": "W",
+  car: "D", driving: "D", drive: "D", taxi: "D", "take taxi": "D",
+  bus: "P", transit: "P", "public transport": "P", train: "P", tram: "P",
+};
+
+function normalizePhone(raw) {
+  if (raw === null || raw === undefined) return null;
+  const cleaned = String(raw).trim().replace(/[\s-()]/g, "");
+  if (cleaned === "") return null;
+  if (cleaned.startsWith("+")) return cleaned;
+  if (cleaned.startsWith("358")) return "+" + cleaned;
+  if (cleaned.startsWith("00")) return "+" + cleaned.slice(2);
+  if (cleaned.startsWith("0")) return "+358" + cleaned.slice(1);
+  // No leading 0 and no country code — assume a bare Finnish subscriber
+  // number (rare, but seen when the leading 0 gets stripped by Sheets
+  // treating the cell as a number).
+  if (/^\d{6,9}$/.test(cleaned)) return "+358" + cleaned;
+  return cleaned;
+}
+
+function isPlausiblePhone(phone) {
+  return typeof phone === "string" && /^\+\d{7,15}$/.test(phone);
+}
+
+function parseTransport(raw) {
+  if (!raw) return { modes: [], unknown: [] };
+  const parts = Array.isArray(raw) ? raw : String(raw).split(/[,/]/);
+  const modes = [];
+  const unknown = [];
+  parts
+    .map((p) => p.trim().toLowerCase())
+    .filter(Boolean)
+    .forEach((p) => {
+      const known = KNOWN_MODES[p];
+      if (known) {
+        if (!modes.includes(known)) modes.push(known);
+      } else {
+        unknown.push(p);
+      }
+    });
+  return { modes, unknown };
+}
+
+function parseLanguages(raw) {
+  if (!raw) return [];
+  const parts = Array.isArray(raw) ? raw : String(raw).split(/[,/]/);
+  const seen = new Set();
+  const result = [];
+  parts
+    .map((p) => p.trim())
+    .filter(Boolean)
+    .forEach((p) => {
+      const key = p.toLowerCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        result.push(p);
+      }
+    });
+  return result;
+}
+
+// Accepts a JS Date, ISO "YYYY-MM-DD", "DD.MM.YYYY", or "DD/MM/YYYY". Returns a Date or null.
+// Note: both dot- and slash-separated formats are treated as DD/MM/YYYY
+// (Finnish convention), not MM/DD/YYYY (US convention).
+function parseDob(raw) {
+  if (!raw) return null;
+  let d = null;
+  if (raw instanceof Date) {
+    d = raw;
+  } else {
+    const s = String(raw).trim();
+    const dmy = s.match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})$/);
+    const dmySlash = s.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (dmy || dmySlash) {
+      const [, day, month, year] = (dmy || dmySlash).map(Number);
+      const candidate = new Date(year, month - 1, day);
+      // JS Date silently rolls over out-of-range values (e.g. day 32 becomes
+      // the 1st/2nd of the next month) instead of erroring — check the
+      // round-trip matches what was actually typed before accepting it.
+      if (candidate.getDate() === day && candidate.getMonth() === month - 1 && candidate.getFullYear() === year) {
+        d = candidate;
+      }
+    } else {
+      const parsed = new Date(s);
+      if (!isNaN(parsed.getTime())) d = parsed;
+    }
+  }
+  if (!d || isNaN(d.getTime())) return null;
+
+  // Sanity range: catches fat-finger year typos (e.g. "2205") without being
+  // strict about exact cutoffs — a rolling application means "youngest
+  // child" could occasionally be a couple of years old.
+  const now = new Date();
+  const fiveYearsAgo = new Date(now.getFullYear() - 5, now.getMonth(), now.getDate());
+  const twoMonthsAhead = new Date(now.getFullYear(), now.getMonth() + 2, now.getDate());
+  if (d < fiveYearsAgo || d > twoMonthsAhead) return null;
+
+  return d;
+}
+
+function parseMaxTravel(raw) {
+  const n = typeof raw === "number" ? raw : parseFloat(String(raw).replace(",", "."));
+  if (!isFinite(n) || n <= 0 || n > 180) return null;
+  return n;
+}
+
+function parseNonEmptyString(raw) {
+  const s = raw === null || raw === undefined ? "" : String(raw).trim();
+  return s === "" ? null : s;
+}
+
+function invalidValue(raw) {
+  if (raw === null || raw === undefined || String(raw).trim() === "") return "(blank)";
+  if (Array.isArray(raw)) return raw.join(", ");
+  return String(raw);
+}
+
+// Deterministic fallback id for rows whose id field is missing. Using a
+// stable hash (rather than Math.random) means the same bad row always gets
+// the same id across reloads and syncs, so it can be stably referenced in
+// error messages and won't re-appear as a "new" problem row after each sync.
+function stableId_(raw) {
+  const key = [raw.name, raw.neighborhood, raw.dob].join("|");
+  let h = 0;
+  for (let i = 0; i < key.length; i++) h = (h * 31 + key.charCodeAt(i)) >>> 0;
+  return "MISSING-" + h.toString(36);
+}
+
+// Runs a raw sheet-shaped row through all the above and returns a
+// normalized applicant plus a list of problems. The applicant is always
+// returned (never throws) so one bad row never blocks the rest of the
+// sheet from loading. `eligibleForMatching` is false if anything required
+// for the matching logic itself is missing/invalid.
+function normalizeApplicant(raw) {
+  const errors = [];
+
+  const id = parseNonEmptyString(raw.id);
+  if (!id) errors.push(`Missing identity number: ${invalidValue(raw.id)}`);
+
+  const name = parseNonEmptyString(raw.name) || "(no name)";
+  if (!parseNonEmptyString(raw.name)) errors.push(`Missing name: ${invalidValue(raw.name)}`);
+
+  const neighborhood = parseNonEmptyString(raw.neighborhood);
+  if (!neighborhood) errors.push(`Missing neighborhood: ${invalidValue(raw.neighborhood)}`);
+
+  const street = parseNonEmptyString(raw.street);
+  if (!street) errors.push(`Missing street address: ${invalidValue(raw.street)}`);
+
+  const { modes: transport, unknown: unknownModes } = parseTransport(raw.transport);
+  if (transport.length === 0) errors.push(`No recognizable transport mode: ${invalidValue(raw.transport)}`);
+  if (unknownModes.length > 0) errors.push(`Unrecognized transport value(s): ${unknownModes.join(", ")}`);
+
+  const language = parseLanguages(raw.language);
+  if (language.length === 0) errors.push(`Missing language(s): ${invalidValue(raw.language)}`);
+
+  const maxTravel = parseMaxTravel(raw.maxTravel);
+  if (maxTravel === null) errors.push(`Missing or invalid max travel time: ${invalidValue(raw.maxTravel)}`);
+
+  const dob = parseDob(raw.dob);
+  if (dob === null) errors.push(`Missing or invalid date of birth (youngest child): ${invalidValue(raw.dob)}`);
+
+  const phone = normalizePhone(raw.phone);
+  if (!isPlausiblePhone(phone)) errors.push(`Missing or invalid phone number: ${invalidValue(raw.phone)}`);
+
+  const applicant = {
+    id: id || stableId_(raw),
+    name,
+    neighborhood: neighborhood || "(unknown)",
+    street: street || "",
+    transport,
+    language,
+    maxTravel,
+    dob,
+    phone: phone || "",
+    hasDataIssues: errors.length > 0,
+    dataIssues: errors,
+    eligibleForMatching: errors.length === 0,
+  };
+
+  return applicant;
+}
+
+const Validation = {
+  KNOWN_MODES,
+  normalizePhone,
+  isPlausiblePhone,
+  parseTransport,
+  parseLanguages,
+  parseDob,
+  parseMaxTravel,
+  parseNonEmptyString,
+  invalidValue,
+  normalizeApplicant,
+};
+
+if (typeof module !== "undefined" && module.exports) {
+  module.exports = Validation;
+}
