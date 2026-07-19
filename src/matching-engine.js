@@ -23,9 +23,10 @@ function haversineKm([lat1, lon1], [lat2, lon2]) {
 // a real routing API result isn't available (no backend configured, a call
 // failed, or the pair fell outside the pre-filter buffer).
 const MODE_MODEL = {
-  walk: { speedKmh: 4.5, overheadMin: 0 },
-  car: { speedKmh: 22, overheadMin: 3 },
-  bus: { speedKmh: 16, overheadMin: 6 },
+  W: { speedKmh: 4.5, overheadMin: 0 },
+  D: { speedKmh: 22, overheadMin: 3 },
+  P: { speedKmh: 16, overheadMin: 6 },
+  B: { speedKmh: 15, overheadMin: 8 },
 };
 
 function estimateTravelTime(distanceKm, mode) {
@@ -75,16 +76,17 @@ function groupAgeRangeLabel(members) {
 }
 
 function pairwiseTravelOk(a, b, settings, travelTimeFn) {
-  const modes = sharedModes(a, b);
-  if (modes.length === 0) return false;
-  const cap = Math.min(a.maxTravel, b.maxTravel);
-  return modes.some((mode) => travelTimeFn(a, b, mode) <= cap);
+  const  aCanTravel = a.transport.some((mode) => travelTimeFn(a, b, mode) <= a.maxTravel);
+  const  bCanTravel = b.transport.some((mode) => travelTimeFn(b, a, mode) <= b.maxTravel);
+  console.log("Pairwise travel", a, b);
+  console.log(`Pairwise travel result ${a.id}, ${b.id}: ${aCanTravel}, ${bCanTravel}`);
+  return aCanTravel && bCanTravel
 }
 
 function fitsGroup(candidate, group, settings, travelTimeFn) {
-  if (!group.every((m) => pairwiseTravelOk(candidate, m, settings, travelTimeFn))) return false;
   if (languageIntersection([...group, candidate]).size === 0) return false;
   if (ageRangeMonths([...group, candidate]) > settings.maxAgeGap) return false;
+  if (!group.every((m) => pairwiseTravelOk(candidate, m, settings, travelTimeFn))) return false;
   return true;
 }
 

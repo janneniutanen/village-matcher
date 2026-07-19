@@ -418,7 +418,7 @@ const MODE_ICON = { bus: '🚌', car: '🚙', walk: '🚶' };
 function codedLine(a) {
   const flags = a.language.map((l) => FLAG_MAP[l] || escHtml(l)).join('');
   const modes = a.transport.map((m) => MODE_ICON[m] || escHtml(m)).join('');
-  return `${escHtml(a.name)} ${flags} ${MatchingEngine.formatMonthYear(a.dob)} ${modes}${a.maxTravel}`;
+  return `<strong>${escHtml(a.id)}</strong> ${escHtml(a.name)} ${flags} ${MatchingEngine.formatMonthYear(a.dob)} ${modes}${a.maxTravel}`;
 }
 
 function renderCandidateCards() {
@@ -428,20 +428,20 @@ function renderCandidateCards() {
     container.innerHTML = `<div class="empty-state">No candidate groups yet. Adjust the filters above and click "Run matching."</div>`;
     return;
   }
-  state.candidateGroups.forEach((cand) => {
-    const members = cand.memberIds.map(getApplicant);
+  state.candidateGroups.forEach((candidateGroup) => {
+    const members = candidateGroup.memberIds.map(getApplicant);
     const card    = document.createElement('div');
     card.className = 'card';
     card.innerHTML = `
       <div class="card-header">
-        <span class="card-title">${escHtml(cand.name)}</span>
+        <span class="card-title">${escHtml(candidateGroup.name)}</span>
         <span class="badge badge-pending">pending</span>
       </div>
       <div class="coded-lines">${members.map((m) => codedLine(m)).join('<br>')}</div>
       <div class="card-actions">
-        <button data-action="approve" data-id="${escHtml(cand.candidateId)}">Approve</button>
-        <button data-action="reject"  data-id="${escHtml(cand.candidateId)}">Reject</button>
-        <button data-action="overlap" data-id="${escHtml(cand.candidateId)}">View overlap on map</button>
+        <button data-action="approve" data-id="${escHtml(candidateGroup.candidateId)}">Approve</button>
+        <button data-action="reject"  data-id="${escHtml(candidateGroup.candidateId)}">Reject</button>
+        <button data-action="overlap" data-id="${escHtml(candidateGroup.candidateId)}">View overlap on map</button>
       </div>`;
     container.appendChild(card);
   });
@@ -462,39 +462,54 @@ function renderCandidateCards() {
 
 function renderUnmatchedList() {
   const container = document.getElementById('unmatchedList');
-  const unmatched = state.applicants.filter((a) => a.matchStatus === 'unmatched' && !a.hasDataIssues);
-  const detailRow = (label, value) => value || value === 0
-    ? `<div><strong>${label}</strong><span>${escHtml(value)}</span></div>`
-    : '';
+  const unmatched = state.applicants.filter((a) => a.matchStatus === 'unmatched' && !a.hasDataIssues && !hasVillage(a));
 
   container.innerHTML = unmatched.length
-    ? unmatched.map((a) => `
-      <div class="mini-card unmatched-card">
-        <div class="unmatched-summary">
-          <button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.id)}</button>
-          <span>${escHtml(a.name)} · ${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span>
-          <span>${escHtml(a.coords)}</span>
-        </div>
-        <div class="applicant-details" hidden>
-          ${detailRow('Name', a.name)}
-          ${detailRow('Phone', a.phone)}
-          ${detailRow('Baby DOB', MatchingEngine.formatMonthYear(a.dob))}
-          ${detailRow('Languages', a.language.join(', '))}
-          ${detailRow('Transport', `${a.transport.join('')} ${a.maxTravel}`)}
-          ${detailRow('Address', `${a.street}, ${a.neighborhood}`)}
-          ${detailRow('Children', a.amountOfChildren)}
-          ${detailRow('Older sibling', a.olderSiblingBirthMonth)}
-          ${detailRow('Hopes', a.hopes)}
-          ${detailRow('Worries', a.worries)}
-          ${detailRow('Questions', a.questions)}
-          ${detailRow('Source', a.source)}
-        </div>
-      </div>`).join('')
+    ? unmatched.map((a) => applicantCard(a)).join('')
     : `<div class="empty-state">Everyone currently in the pool is either matched or pending approval.</div>`;
 
+  attachApplicantDetailToggles(container);
+}
+
+function hasVillage(a) {
+  return a.village !== null && a.village !== undefined && String(a.village).trim() !== '';
+}
+
+function applicantCard(a) {
+  const detailRow = (label, value, unsafeValue) => value || unsafeValue || value === 0
+    ? `<div><strong>${label}</strong><span>${value ? escHtml(value) : ''}${unsafeValue ? unsafeValue : ''}</span></div>`
+    : '';
+
+  return `
+    <div class="mini-card unmatched-card applicant-card">
+      <div class="unmatched-summary">
+        <button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.id)}</button>
+        <span>${escHtml(a.name)} · ${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span>
+        <span>${escHtml(a.coords)}</span>
+      </div>
+      <div class="applicant-details" hidden>
+        ${detailRow('Name', a.name)}
+        ${detailRow('Phone', undefined, `<a href="https://wa.me/${a.phone.slice(1)}">${a.phone}</a>`)}
+        ${detailRow('Baby DOB', MatchingEngine.formatMonthYear(a.dob))}
+        ${detailRow('Languages', a.language.join(', '))}
+        ${detailRow('Transport', `${a.transport.join('')} ${a.maxTravel}`)}
+        ${detailRow('Address', `${a.street}, ${a.neighborhood}`)}
+        ${detailRow('Children', a.amountOfChildren)}
+        ${detailRow('Older sibling', a.olderSiblingBirthMonth)}
+        ${detailRow('Hopes', a.hopes)}
+        ${detailRow('Worries', a.worries)}
+        ${detailRow('Questions', a.questions)}
+        ${detailRow('Source', a.source)}
+        ${detailRow('My notes', a.myNotes)}
+        ${detailRow('Status', a.status)}
+      </div>
+    </div>`;
+}
+
+function attachApplicantDetailToggles(container) {
   container.querySelectorAll('.id-toggle').forEach((btn) => {
     btn.addEventListener('click', () => {
-      const details = btn.closest('.unmatched-card').querySelector('.applicant-details');
+      const details = btn.closest('.applicant-card').querySelector('.applicant-details');
       const isOpen  = !details.hidden;
       details.hidden = isOpen;
       btn.setAttribute('aria-expanded', String(!isOpen));
@@ -523,40 +538,34 @@ function renderActiveGroups() {
     : '';
 
   container.innerHTML = '';
-  if (state.groups.length === 0) {
-    container.innerHTML = `<div class="empty-state">No groups formed yet — approve candidates in the New Matches tab.</div>`;
+  const applicantsByVillage = state.applicants.reduce((byVillage, a) => {
+    if (!hasVillage(a)) return byVillage;
+    const village = String(a.village).trim();
+    if (!byVillage.has(village)) byVillage.set(village, []);
+    byVillage.get(village).push(a);
+    return byVillage;
+  }, new Map());
+  const villages = [...applicantsByVillage.entries()].sort(([a], [b]) => a.localeCompare(b));
+
+  if (villages.length === 0) {
+    container.innerHTML = `<div class="empty-state">No active groups yet.</div>`;
+    attachApplicantDetailToggles(container);
+    return;
   }
-  state.groups.forEach((group) => {
-    const members = group.memberIds.map(getApplicant);
+  villages.forEach(([village, members]) => {
     const el      = document.createElement('div');
     el.className  = 'card';
-    const missing = state.settings.minGroupSize - members.length;
     el.innerHTML = `
       <div class="card-header">
-        <span class="card-title">${escHtml(group.name)} · ${members.length} moms</span>
-        <span class="badge ${group.status === 'established' ? 'badge-established' : 'badge-open'}">${escHtml(group.status)}</span>
+        <span class="card-title">${escHtml(village)} · ${members.length} moms</span>
       </div>
-      ${members.map((m) => `
-        <div class="member-row">
-          <div class="coded-lines">${codedLine(m)}</div>
-          ${statusStepper(m.matchStatus)}
-          <div class="member-actions">
-            <a class="wa-link" rel="noopener noreferrer" target="_blank" href="${waLink(m, stageTemplateFor(m.matchStatus), group)}">Message on WhatsApp</a>
-            <button data-action="advance" data-id="${escHtml(m.id)}">Advance stage</button>
-            <button data-action="decline" data-id="${escHtml(m.id)}">Mark declined</button>
-          </div>
-        </div>`).join('')}
-      <div class="card-actions">
-        <button data-action="copy" data-id="${escHtml(group.id)}">Copy phone numbers</button>
-        ${group.status === 'established' && missing > 0
-          ? `<button data-action="suggest" data-id="${escHtml(group.id)}">Suggest replacement (${missing} needed)</button>`
-          : ''}
-      </div>
-      <div class="replacement-suggestions" id="suggestions-${escHtml(group.id)}"></div>`;
+      <div class="mini-card-list">${members.map((m) => applicantCard(m)).join('')}</div>`;
     container.appendChild(el);
   });
 
-  container.querySelectorAll('button').forEach((btn) => {
+  attachApplicantDetailToggles(container);
+
+  container.querySelectorAll('button[data-action]').forEach((btn) => {
     btn.addEventListener('click', () => {
       const id = btn.dataset.id;
       if (btn.dataset.action === 'advance') {

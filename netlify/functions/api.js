@@ -39,10 +39,12 @@ const COL = {
   id: 'Identity number', name: 'Name', neighborhood: 'Neighbourhood',
   street: 'Street address', transport: 'Transport', language: 'Language',
   maxTravel: 'travel time', dob: 'Date of birth', phone: 'Phone number',
-  matchStatus: 'Match Status', matchGroupId: 'Match Group ID',
-  olderSiblingBirthMonth: 'birth month',
+  village: 'Village', villageStatus: 'Village status',
+  status: "Mum's status", matchGroupId: 'Match Group ID',
+  olderSiblingBirthMonth: 'Older child',
   worries: 'worries', hopes: 'hopes', questions: 'questions',
   source: 'source', amountOfChildren: 'amount of children',
+  myNotes: 'My notes'
 };
 
 // ---------------------------------------------------------------------------
@@ -189,17 +191,7 @@ async function sheetGetApplicants() {
   const get = (row, col) => cellGet(row, hi, col);
 
   return rows.slice(1).map((row, i) => {
-    const raw = {
-      id:           get(row, COL.id),
-      name:         get(row, COL.name),
-      neighborhood: get(row, COL.neighborhood),
-      street:       get(row, COL.street),
-      transport:    get(row, COL.transport),
-      language:     get(row, COL.language),
-      maxTravel:    get(row, COL.maxTravel),
-      dob:          get(row, COL.dob),
-      phone:        get(row, COL.phone),
-    };
+    const raw = Object.entries(COL).reduce((acc, [propertyName, columnName]) => ({...acc, [propertyName]: get(row, columnName)}), {});
     const a = Validation.normalizeApplicant(raw);
     a.sheetRow            = i + 2;
     a.matchStatus         = get(row, COL.matchStatus)  || 'unmatched';

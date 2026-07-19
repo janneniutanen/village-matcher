@@ -13,6 +13,7 @@
 const KNOWN_MODES = {
   walk: "W", walking: "W", foot: "W", "on foot": "W",
   car: "D", driving: "D", drive: "D", taxi: "D", "take taxi": "D",
+  "bicycle": "B", "bike": "B",
   bus: "P", transit: "P", "public transport": "P", train: "P", tram: "P",
 };
 
@@ -21,13 +22,10 @@ function normalizePhone(raw) {
   const cleaned = String(raw).trim().replace(/[\s-()]/g, "");
   if (cleaned === "") return null;
   if (cleaned.startsWith("+")) return cleaned;
-  if (cleaned.startsWith("358")) return "+" + cleaned;
   if (cleaned.startsWith("00")) return "+" + cleaned.slice(2);
   if (cleaned.startsWith("0")) return "+358" + cleaned.slice(1);
-  // No leading 0 and no country code — assume a bare Finnish subscriber
-  // number (rare, but seen when the leading 0 gets stripped by Sheets
-  // treating the cell as a number).
   if (/^\d{6,9}$/.test(cleaned)) return "+358" + cleaned;
+  if (!cleaned.startsWith("+")) return "+" + cleaned;
   return cleaned;
 }
 
@@ -112,7 +110,7 @@ function parseDob(raw) {
 }
 
 function parseMaxTravel(raw) {
-  const n = typeof raw === "number" ? raw : parseFloat(String(raw).replace(",", "."));
+  const n = typeof raw === "number" ? raw : parseFloat(String(raw).replaceAll(/[^\d]/g, ''));
   if (!isFinite(n) || n <= 0 || n > 180) return null;
   return n;
 }
@@ -188,8 +186,11 @@ function normalizeApplicant(raw) {
     hasDataIssues: errors.length > 0,
     dataIssues: errors,
     eligibleForMatching: errors.length === 0,
+    village: parseNonEmptyString(raw.village),
+    status: parseNonEmptyString(raw.status),
+    villageStatus: parseNonEmptyString(raw.villageStatus),
+    myNotes: parseNonEmptyString(raw.myNotes),
   };
-
   return applicant;
 }
 

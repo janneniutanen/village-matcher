@@ -145,6 +145,30 @@ test("UI smoke: unmatched applicant ID opens row details", async () => {
   assert.match(details.textContent, /Phone/);
 });
 
+test("UI smoke: active groups render applicants grouped by village", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  window.__test__.state.applicants[0].village = "Kallio Village";
+  window.__test__.state.applicants[1].village = "Kallio Village";
+  window.__test__.state.applicants[2].village = null;
+  window.__test__.renderAll();
+
+  const activeGroups = window.document.getElementById("activeGroups");
+  const unmatchedList = window.document.getElementById("unmatchedList");
+  assert.match(activeGroups.textContent, /Kallio Village · 2 moms/);
+  assert.match(activeGroups.textContent, new RegExp(window.__test__.state.applicants[0].id));
+  assert.doesNotMatch(activeGroups.textContent, new RegExp(`${window.__test__.state.applicants[2].id}.*Sara`, "s"));
+  assert.doesNotMatch(unmatchedList.textContent, new RegExp(window.__test__.state.applicants[0].id));
+  assert.match(unmatchedList.textContent, new RegExp(window.__test__.state.applicants[2].id));
+
+  const btn = activeGroups.querySelector(".id-toggle");
+  const details = btn.closest(".applicant-card").querySelector(".applicant-details");
+  btn.click();
+  assert.equal(details.hidden, false);
+  assert.match(details.textContent, /Phone/);
+});
+
 test("UI smoke: running the matching engine produces candidate groups and renders them", async () => {
   const window = buildWindow();
   await window.__test__.init();

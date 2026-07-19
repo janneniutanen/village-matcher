@@ -17,6 +17,11 @@ test("normalizePhone: 00-prefixed international is converted to +", () => {
   assert.equal(Validation.normalizePhone("00358401234567"), "+358401234567");
 });
 
+test("normalizePhone: phone number missing + has + added on is converted to +", () => {
+  assert.equal(Validation.normalizePhone("44401234567"), "+44401234567");
+});
+
+
 test("normalizePhone: garbage input returns something, not a crash", () => {
   assert.doesNotThrow(() => Validation.normalizePhone("abc"));
   assert.equal(Validation.normalizePhone(""), null);
