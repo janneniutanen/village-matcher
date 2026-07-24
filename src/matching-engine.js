@@ -23,10 +23,10 @@ function haversineKm([lat1, lon1], [lat2, lon2]) {
 // a real routing API result isn't available (no backend configured, a call
 // failed, or the pair fell outside the pre-filter buffer).
 const MODE_MODEL = {
-  W: { speedKmh: 4.5, overheadMin: 0 },
-  D: { speedKmh: 22, overheadMin: 3 },
-  P: { speedKmh: 16, overheadMin: 6 },
-  B: { speedKmh: 15, overheadMin: 8 },
+  W: { speedKmh: 4.5, overheadMin: 0 }, // Walk
+  D: { speedKmh: 22, overheadMin: 3 }, // Drive/car/taxi
+  P: { speedKmh: 16, overheadMin: 6 }, // Public transport
+  B: { speedKmh: 15, overheadMin: 8 }, // Bicycle
 };
 
 function estimateTravelTime(distanceKm, mode) {

@@ -177,11 +177,19 @@ test("UI smoke: running the matching engine produces candidate groups and render
 
   window.__test__.state.candidateGroups = groups;
   window.__test__.renderCandidateCards();
-  const html = window.document.getElementById("candidateCards").innerHTML;
-  // Coded-text line format should show up for at least the first group's members
+  const candidateCards = window.document.getElementById("candidateCards");
+  const html = candidateCards.innerHTML;
   const firstMemberName = window.__test__.getApplicant(groups[0].memberIds[0]).name;
   assert.match(html, new RegExp(firstMemberName));
   assert.match(html, /Approve/);
+
+  const btn = candidateCards.querySelector(".id-toggle");
+  const details = btn.closest(".applicant-card").querySelector(".applicant-details");
+  assert.equal(details.hidden, true);
+  btn.click();
+  assert.equal(details.hidden, false);
+  assert.match(details.textContent, /Phone/);
+  assert.ok(candidateCards.querySelector(".participant-map-dot"), "expected candidate participant map color dot");
 });
 
 test("UI smoke: approving a group persists to the backend (real HTTP round trip)", async () => {

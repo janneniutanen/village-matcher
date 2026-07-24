@@ -430,6 +430,7 @@ function renderCandidateCards() {
   }
   state.candidateGroups.forEach((candidateGroup) => {
     const members = candidateGroup.memberIds.map(getApplicant);
+    const color   = candidateColor(candidateGroup.candidateId);
     const card    = document.createElement('div');
     card.className = 'card';
     card.innerHTML = `
@@ -437,7 +438,7 @@ function renderCandidateCards() {
         <span class="card-title">${escHtml(candidateGroup.name)}</span>
         <span class="badge badge-pending">pending</span>
       </div>
-      <div class="coded-lines">${members.map((m) => codedLine(m)).join('<br>')}</div>
+      <div class="mini-card-list">${members.map((m) => applicantCard(m, color)).join('')}</div>
       <div class="card-actions">
         <button data-action="approve" data-id="${escHtml(candidateGroup.candidateId)}">Approve</button>
         <button data-action="reject"  data-id="${escHtml(candidateGroup.candidateId)}">Reject</button>
@@ -446,7 +447,9 @@ function renderCandidateCards() {
     container.appendChild(card);
   });
 
-  container.querySelectorAll('button').forEach((btn) => {
+  attachApplicantDetailToggles(container);
+
+  container.querySelectorAll('button[data-action]').forEach((btn) => {
     btn.addEventListener('click', async () => {
       if (btn.disabled) return;
       const id = btn.dataset.id;
@@ -475,15 +478,18 @@ function hasVillage(a) {
   return a.village !== null && a.village !== undefined && String(a.village).trim() !== '';
 }
 
-function applicantCard(a) {
+function applicantCard(a, mapColor) {
   const detailRow = (label, value, unsafeValue) => value || unsafeValue || value === 0
     ? `<div><strong>${label}</strong><span>${value ? escHtml(value) : ''}${unsafeValue ? unsafeValue : ''}</span></div>`
+    : '';
+  const mapDot = mapColor
+    ? `<span class="participant-map-dot" style="background:${escHtml(mapColor)}; border-color:${escHtml(mapColor)}" aria-label="Map dot color"></span>`
     : '';
 
   return `
     <div class="mini-card unmatched-card applicant-card">
       <div class="unmatched-summary">
-        <button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.id)}</button>
+        <span class="participant-id-wrap">${mapDot}<button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.id)}</button></span>
         <span>${escHtml(a.name)} · ${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span>
         <span>${escHtml(a.coords)}</span>
       </div>
@@ -766,12 +772,15 @@ function wireControls() {
 
   document.getElementById('syncBtn').addEventListener('click', async () => {
     const btn = document.getElementById('syncBtn');
-    btn.disabled = true; btn.textContent = 'Syncing…';
+    btn.disabled = true;
+    btn.textContent = 'Syncing…';
     const success = await loadFromBackend();
     populateNeighborhoodFilter();
     renderSettingsTab();
     renderAll();
-    btn.disabled = false; btn.textContent = '↻ Sync with Google Sheet';
+    btn.disabled = false;
+    btn.textContent = '↻ Sync with Google Sheet';
+    console.log("Synced");
     if (!success) alert('Sync failed — check your connection and try again.');
   });
 

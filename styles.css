@@ -229,6 +229,14 @@ button:hover { background: var(--surface-muted); }
 
 .unmatched-card { align-items: stretch; flex-direction: column; gap: 8px; }
 .unmatched-summary { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+.participant-id-wrap { display: inline-flex; align-items: center; gap: 7px; }
+.participant-map-dot {
+  width: 12px;
+  height: 12px;
+  border: 2px solid currentColor;
+  border-radius: 999px;
+  flex: 0 0 auto;
+}
 .id-toggle {
   border: none;
   background: transparent;
