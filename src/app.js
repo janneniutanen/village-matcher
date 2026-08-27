@@ -202,13 +202,18 @@ async function computeCandidateGroups() {
   for (let i = 0; i < pool.length; i++) {
     for (let j = i + 1; j < pool.length; j++) {
       const a = pool[i], b = pool[j];
-      const modes = MatchingEngine.sharedModes(a, b);
-      if (modes.length === 0) continue;
-      const distanceKm  = MatchingEngine.haversineKm(a.coords, b.coords);
-      const bestSpeed   = Math.max(...modes.map((m) => MatchingEngine.MODE_MODEL[m].speedKmh));
-      const roughCapKm  = (Math.min(a.maxTravel, b.maxTravel) / 60) * bestSpeed * 1.5;
-      if (distanceKm > roughCapKm) continue;
-      modes.forEach((mode) => pairsNeeded.push({ a, b, mode }));
+      const distanceKm = MatchingEngine.haversineKm(a.coords, b.coords);
+      const modesA = a.transport.filter((mode) => {
+        const model = MatchingEngine.MODE_MODEL[mode];
+        return model && distanceKm <= (a.maxTravel / 60) * model.speedKmh * 1.5;
+      });
+      const modesB = b.transport.filter((mode) => {
+        const model = MatchingEngine.MODE_MODEL[mode];
+        return model && distanceKm <= (b.maxTravel / 60) * model.speedKmh * 1.5;
+      });
+      if (modesA.length === 0 || modesB.length === 0) continue;
+      modesA.forEach((mode) => pairsNeeded.push({ a, b, mode }));
+      modesB.forEach((mode) => pairsNeeded.push({ a: b, b: a, mode }));
     }
   }
   await ensureTravelTimes(pairsNeeded);

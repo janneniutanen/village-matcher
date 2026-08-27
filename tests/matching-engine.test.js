@@ -102,11 +102,24 @@ test("fitsGroup: fails when travel time exceeds the cap", () => {
   assert.equal(Engine.fitsGroup(candidate, group, settings, makeStubTravelTime([["A", "B"]])), false);
 });
 
-test("fitsGroup: fails when there's no shared transport mode", () => {
+test("fitsGroup: passes without shared transport modes when both can travel", () => {
   const settings = { maxAgeGap: 6 };
   const group = [mom({ id: "A", transport: ["bus"] })];
   const candidate = mom({ id: "B", transport: ["car"] });
-  assert.equal(Engine.fitsGroup(candidate, group, settings, makeStubTravelTime()), false);
+  assert.equal(Engine.fitsGroup(candidate, group, settings, makeStubTravelTime()), true);
+});
+
+test("fitsGroup: passes when each candidate has one viable mode among multiple", () => {
+  const settings = { maxAgeGap: 6 };
+  const group = [mom({ id: "A", transport: ["P", "W"], maxTravel: 30 })];
+  const candidate = mom({ id: "B", transport: ["B", "W"], maxTravel: 15 });
+  const travelTime = (a, b, mode) => {
+    if (a.id === "A" && b.id === "B" && mode === "P") return 6;
+    if (a.id === "B" && b.id === "A" && mode === "B") return 13;
+    return 60;
+  };
+
+  assert.equal(Engine.fitsGroup(candidate, group, settings, travelTime), true);
 });
 
 test("fitsGroup: fails when no language is shared with the whole group", () => {
