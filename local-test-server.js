@@ -24,6 +24,7 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const Validation = require("./src/validation.js");
+const MatchingEngine = require("./src/matching-engine.js");
 
 // ---------------------------------------------------------------------------
 // Argument parsing — detect mode from the first argument
@@ -134,8 +135,18 @@ function fakeGeocode(addresses) {
              lon: base[1] + ((((h >> 10) % 1000) / 1000) - 0.5) * 0.02, _fake: true };
   });
 }
+// Distance- and mode-aware, unlike a flat hash: the match quality score is
+// dominated by travel time, so a stub that ignored geography made the whole
+// ranking meaningless when testing locally. Uses the engine's own estimate,
+// plus a small deterministic jitter so times aren't suspiciously exact.
 function fakeTravelTime(pairs) {
-  return pairs.map((p) => ({ id: p.id, minutes: 4 + (stableHash(p.id) % 12), _fake: true }));
+  return pairs.map((p) => {
+    const km = MatchingEngine.haversineKm([p.from.lat, p.from.lon], [p.to.lat, p.to.lon]);
+    const estimate = MatchingEngine.estimateTravelTime(km, p.mode);
+    if (!isFinite(estimate)) return { id: p.id, error: `Unknown transport mode '${p.mode}'` };
+    const jitter = ((stableHash(p.id) % 21) - 10) / 100; // ±10%
+    return { id: p.id, minutes: Math.max(1, estimate * (1 + jitter)), _fake: true };
+  });
 }
 function fakeIsochrone() {
   return { type: "FeatureCollection", features: [], _fake: true, note: "local test server stub" };

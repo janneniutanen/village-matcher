@@ -223,6 +223,48 @@ test("UI smoke: running the matching engine produces candidate groups and render
   assert.ok(candidateCards.querySelector(".participant-map-dot"), "expected candidate participant map color dot");
 });
 
+test("UI smoke: candidate cards show rank, total score and the breakdown", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const groups = await window.__test__.computeCandidateGroups();
+  assert.ok(groups.length >= 2, "need at least two groups to check ranking");
+
+  window.__test__.state.candidateGroups = groups;
+  window.__test__.renderCandidateCards();
+  const cards = window.document.querySelectorAll("#candidateCards .card");
+
+  // Rank badges are sequential and the score matches the engine.
+  assert.equal(cards[0].querySelector(".rank-badge").textContent, "#1");
+  assert.equal(cards[1].querySelector(".rank-badge").textContent, "#2");
+  const shown = Number(cards[0].querySelector(".badge-score").textContent.replace(/\D/g, ""));
+  assert.equal(shown, Math.round(groups[0].score.total * 100));
+
+  // All three signals are broken out, each with a bar width matching its value.
+  const rows = cards[0].querySelectorAll(".score-row");
+  assert.equal(rows.length, 3);
+  const labels = [...rows].map((r) => r.querySelector(".score-label").textContent);
+  assert.deepEqual(labels, ["Travel", "Baby age", "Language"]);
+  ["travel", "age", "language"].forEach((key, i) => {
+    const expected = Math.round(groups[0].score[key] * 100);
+    assert.equal(rows[i].querySelector(".score-value").textContent, `${expected}%`);
+    assert.equal(rows[i].querySelector(".score-fill").style.width, `${expected}%`);
+  });
+});
+
+test("UI smoke: cards are ordered strongest first", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const groups = await window.__test__.computeCandidateGroups();
+
+  window.__test__.state.candidateGroups = groups;
+  window.__test__.renderCandidateCards();
+
+  const shown = [...window.document.querySelectorAll("#candidateCards .badge-score")]
+    .map((b) => Number(b.textContent.replace(/\D/g, "")));
+  const descending = shown.every((v, i) => i === 0 || shown[i - 1] >= v);
+  assert.ok(descending, `expected descending scores, got ${shown.join(", ")}`);
+});
+
 test("UI smoke: approving a group persists to the backend (real HTTP round trip)", async () => {
   const window = buildWindow();
   await window.__test__.init();

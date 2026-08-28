@@ -151,6 +151,10 @@ Travel is weighted highest because a group that is awkward to reach won't
 actually meet. The weights live in `SCORE_WEIGHTS` in
 `src/matching-engine.js` if they need tuning.
 
+Each candidate card shows its rank, the overall score, and a bar per signal,
+so a group that is weak on one dimension is distinguishable from one that is
+mediocre across the board.
+
 Scoring only ranks groups that already pass the hard constraints in
 `fitsGroup` (shared language, age gap, travel time within each member's
 limit) — it never lets an ineligible group through.

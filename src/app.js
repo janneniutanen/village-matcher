@@ -218,11 +218,14 @@ async function computeCandidateGroups() {
   }
   await ensureTravelTimes(pairsNeeded);
 
+  // clusterGroups already returns strongest-first; the score is recomputed
+  // here for display rather than widening its return type.
   const groups = MatchingEngine.clusterGroups(pool, state.settings, getTravelMinutes);
   return groups.map((group, i) => ({
     candidateId: 'cand-' + i,
     memberIds:   group.map((m) => m.id),
     name:        `${MatchingEngine.mostCommonNeighborhood(group)} · ${MatchingEngine.groupAgeRangeLabel(group)} · ${group.length} moms`,
+    score:       MatchingEngine.scoreGroup(group, state.settings, getTravelMinutes),
   }));
 }
 
@@ -398,6 +401,45 @@ async function drawOverlap(candidateId) {
 const FLAG_MAP = { English: '🇬🇧', Finnish: '🇫🇮', Swedish: '🇸🇪', Russian: '🇷🇺', Arabic: '🇸🇦', French: '🇫🇷', Swahili: '🇰🇪' };
 const MODE_ICON = { W: '🚶', D: '🚙', P: '🚌', B: '🚲' };
 
+const SCORE_LABELS = {
+  travel:   'Travel',
+  age:      'Baby age',
+  language: 'Language',
+};
+
+const SCORE_HINTS = {
+  travel:   "Worst single journey in the group, against that member's own travel limit",
+  age:      'How tightly the babies cluster in age, against the configured max age gap',
+  language: 'How much of the members\u2019 shared languages is common to everyone',
+};
+
+function pct(n) {
+  return Math.round(n * 100);
+}
+
+// The score breakdown is shown so the coordinator can see why a group ranked
+// where it did — a weak group with one bad dimension reads very differently
+// from one that is mediocre across the board.
+function scorePanel(score) {
+  if (!score) return '';
+  const bar = (key) => {
+    const value = pct(score[key]);
+    const weight = MatchingEngine.SCORE_WEIGHTS[key];
+    return `
+      <div class="score-row">
+        <span class="score-label" title="${escHtml(SCORE_HINTS[key])}">${escHtml(SCORE_LABELS[key])}</span>
+        <span class="score-track" role="img" aria-label="${escHtml(SCORE_LABELS[key])}: ${value} percent, weighted ${weight}">
+          <span class="score-fill score-fill-${escHtml(key)}" style="width:${value}%"></span>
+        </span>
+        <span class="score-value">${value}%</span>
+      </div>`;
+  };
+  return `
+    <div class="score-panel">
+      ${['travel', 'age', 'language'].map(bar).join('')}
+    </div>`;
+}
+
 function renderCandidateCards() {
   const container = document.getElementById('candidateCards');
   container.innerHTML = '';
@@ -405,16 +447,20 @@ function renderCandidateCards() {
     container.innerHTML = `<div class="empty-state">No candidate groups yet. Adjust the filters above and click "Run matching."</div>`;
     return;
   }
-  state.candidateGroups.forEach((candidateGroup) => {
+  state.candidateGroups.forEach((candidateGroup, rank) => {
     const members = candidateGroup.memberIds.map(getApplicant);
     const color   = candidateColor(candidateGroup.candidateId);
+    const score   = candidateGroup.score;
     const card    = document.createElement('div');
     card.className = 'card';
     card.innerHTML = `
       <div class="card-header">
-        <span class="card-title">${escHtml(candidateGroup.name)}</span>
-        <span class="badge badge-pending">pending</span>
+        <span class="card-title"><span class="rank-badge">#${rank + 1}</span>${escHtml(candidateGroup.name)}</span>
+        ${score
+          ? `<span class="badge badge-score" title="Weighted match score — higher is a stronger group">${pct(score.total)}% match</span>`
+          : `<span class="badge badge-pending">pending</span>`}
       </div>
+      ${scorePanel(score)}
       <div class="mini-card-list">${members.map((m) => applicantCard(m, color)).join('')}</div>
       <div class="card-actions">
         <button data-action="approve" data-id="${escHtml(candidateGroup.candidateId)}">Approve</button>
