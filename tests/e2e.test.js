@@ -81,10 +81,12 @@ test("getApplicants: corrupted rows carry human-readable reasons", async () => {
   assert.ok(riikka.dataIssues.some((e) => e.toLowerCase().includes("neighborhood")));
 });
 
-test("getApplicants: valid rows have real coordin -independent fields parsed correctly", async () => {
+test("getApplicants: valid rows have coordinate-independent fields parsed correctly", async () => {
   const { result } = await call("getApplicants");
   const lisa = result.find((a) => a.name === "Lisa");
-  assert.deepEqual(lisa.transport.sort(), ["bus", "car", "walk"]);
+  // Transport words from the sheet are normalized to the single-letter codes
+  // the matching engine and routing profiles are keyed by.
+  assert.deepEqual(lisa.transport.sort(), ["D", "P", "W"]);
   assert.deepEqual(lisa.language, ["Russian", "English"]);
   assert.equal(lisa.phone, "+358401234501");
   assert.equal(lisa.maxTravel, 15);
@@ -166,10 +168,11 @@ test("geocode / travelTime / isochrone stubs respond in the shape the front end 
   assert.equal(geo.ok, true);
   assert.equal(typeof geo.result[0].lat, "number");
 
-  const travel = await call("travelTime", { pairs: [{ id: "p1", from: { lat: 60.18, lon: 24.95 }, to: { lat: 60.2, lon: 24.9 }, mode: "car" }] });
+  // Modes on the wire are the normalized codes: W walk, D drive, P transit, B bike.
+  const travel = await call("travelTime", { pairs: [{ id: "p1", from: { lat: 60.18, lon: 24.95 }, to: { lat: 60.2, lon: 24.9 }, mode: "D" }] });
   assert.equal(travel.ok, true);
   assert.equal(typeof travel.result[0].minutes, "number");
 
-  const iso = await call("isochrone", { locations: [{ lat: 60.18, lon: 24.95 }], mode: "car", minutes: 15 });
+  const iso = await call("isochrone", { locations: [{ lat: 60.18, lon: 24.95 }], mode: "D", minutes: 15 });
   assert.equal(iso.ok, true);
 });
