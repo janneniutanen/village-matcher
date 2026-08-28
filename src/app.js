@@ -398,7 +398,6 @@ async function drawOverlap(candidateId) {
   });
 }
 
-const FLAG_MAP = { English: '🇬🇧', Finnish: '🇫🇮', Swedish: '🇸🇪', Russian: '🇷🇺', Arabic: '🇸🇦', French: '🇫🇷', Swahili: '🇰🇪' };
 const MODE_ICON = { W: '🚶', D: '🚙', P: '🚌', B: '🚲' };
 
 const SCORE_LABELS = {

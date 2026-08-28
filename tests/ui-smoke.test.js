@@ -1,5 +1,5 @@
 // UI-level smoke test: loads the REAL index.html markup and REAL app.js /
-// matching-engine.js / validation.js / mock-data.js into a jsdom window,
+// matching-engine.js / validation.js into a jsdom window,
 // pointed at a REAL local-test-server.js instance over REAL HTTP (Node's
 // built-in fetch) — the only thing faked is Leaflet itself (jsdom has no
 // map canvas/tile-rendering to test against, so map calls are stubbed to
@@ -88,7 +88,7 @@ function buildWindow() {
   window.navigator.clipboard = { writeText: async () => {} };
   window.localStorage.setItem("matcherPassword", "test");
 
-  const files = ["src/matching-engine.js", "src/validation.js", "src/mock-data.js", "src/app.js"];
+  const files = ["src/matching-engine.js", "src/validation.js", "src/app.js"];
   files.forEach((f) => {
     const script = window.document.createElement("script");
     script.textContent = fs.readFileSync(path.join(__dirname, "..", f), "utf8");

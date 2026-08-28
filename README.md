@@ -67,7 +67,6 @@ src/
   app.js                     all UI logic and backend calls
   matching-engine.js         grouping algorithm
   validation.js              row validation (browser + function share same file)
-  mock-data.js               offline fallback (18 sample applicants)
 netlify/
   functions/
     api.js                   Netlify Function — all backend logic
