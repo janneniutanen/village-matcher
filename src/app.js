@@ -785,7 +785,6 @@ function wireControls() {
     renderAll();
     btn.disabled = false;
     btn.textContent = '↻ Sync with Google Sheet';
-    console.log("Synced");
     if (!success) alert('Sync failed — check your connection and try again.');
   });
 

@@ -75,12 +75,13 @@ function groupAgeRangeLabel(members) {
   return earliest === latest ? earliest : `${earliest}\u2013${latest}`;
 }
 
+// Directional: each person must be able to reach the other using one of
+// their own transport modes, within their own max travel time. A shared
+// mode is not required.
 function pairwiseTravelOk(a, b, settings, travelTimeFn) {
-  const  aCanTravel = a.transport.some((mode) => travelTimeFn(a, b, mode) <= a.maxTravel);
-  const  bCanTravel = b.transport.some((mode) => travelTimeFn(b, a, mode) <= b.maxTravel);
-  console.log("Pairwise travel", a, b);
-  console.log(`Pairwise travel result ${a.id}, ${b.id}: ${aCanTravel}, ${bCanTravel}`);
-  return aCanTravel && bCanTravel
+  const aCanTravel = a.transport.some((mode) => travelTimeFn(a, b, mode) <= a.maxTravel);
+  const bCanTravel = b.transport.some((mode) => travelTimeFn(b, a, mode) <= b.maxTravel);
+  return aCanTravel && bCanTravel;
 }
 
 function fitsGroup(candidate, group, settings, travelTimeFn) {
