@@ -84,6 +84,69 @@ function pairwiseTravelOk(a, b, settings, travelTimeFn) {
   return aCanTravel && bCanTravel;
 }
 
+// ---------------------------------------------------------------------------
+// Group quality scoring
+//
+// fitsGroup answers "is this group allowed?" — a yes/no against the hard
+// constraints. scoreGroup answers "how good is it?", so that groups can be
+// grown best-first and presented strongest-first rather than in whatever
+// order the pool happened to be iterated.
+// ---------------------------------------------------------------------------
+
+// Travel dominates because a group that is awkward to reach won't actually
+// meet; age and language affect how well it gels once it does.
+const SCORE_WEIGHTS = { travel: 0.5, age: 0.3, language: 0.2 };
+
+function clamp01(n) {
+  if (!isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+// Scored on the worst pair rather than the average: a group is only as
+// reachable as its most burdened member. Each leg is measured against that
+// member's own stated limit, matching the directional rule in
+// pairwiseTravelOk.
+function travelScore(members, travelTimeFn) {
+  if (members.length < 2) return 1;
+  let worstRatio = 0;
+  for (const a of members) {
+    for (const b of members) {
+      if (a.id === b.id) continue;
+      if (!a.transport.length || !a.maxTravel) return 0;
+      const best = Math.min(...a.transport.map((mode) => travelTimeFn(a, b, mode)));
+      worstRatio = Math.max(worstRatio, best / a.maxTravel);
+    }
+  }
+  return clamp01(1 - worstRatio);
+}
+
+// Rewards a tight age spread rather than merely staying under maxAgeGap.
+function ageScore(members, settings) {
+  if (!settings.maxAgeGap) return 1;
+  return clamp01(1 - ageRangeMonths(members) / settings.maxAgeGap);
+}
+
+// How much of the members' language repertoires is actually common ground.
+// 1.0 means every language the narrowest-speaking member has is shared by
+// the whole group, so nobody has to fall back to a second language.
+function languageScore(members) {
+  const narrowest = Math.min(...members.map((m) => m.language.length));
+  if (!narrowest) return 0;
+  return clamp01(languageIntersection(members).size / narrowest);
+}
+
+function scoreGroup(members, settings, travelTimeFn) {
+  const travel   = travelScore(members, travelTimeFn);
+  const age      = ageScore(members, settings);
+  const language = languageScore(members);
+  return {
+    travel,
+    age,
+    language,
+    total: SCORE_WEIGHTS.travel * travel + SCORE_WEIGHTS.age * age + SCORE_WEIGHTS.language * language,
+  };
+}
+
 function fitsGroup(candidate, group, settings, travelTimeFn) {
   if (languageIntersection([...group, candidate]).size === 0) return false;
   if (ageRangeMonths([...group, candidate]) > settings.maxAgeGap) return false;
@@ -91,11 +154,12 @@ function fitsGroup(candidate, group, settings, travelTimeFn) {
   return true;
 }
 
-// Simple greedy clustering: walk through the pool (oldest baby first, for
-// determinism), grow each group while candidates still fit, stop at
-// maxGroupSize, keep the group only if it reached minGroupSize. This is a
-// heuristic, not an optimal solver — documented as a known simplification
-// in the design doc and README.
+// Greedy best-fit clustering: walk through the pool (oldest baby first, for
+// determinism) and grow each group by repeatedly adding whichever eligible
+// candidate produces the highest-scoring group. Stop at maxGroupSize, keep
+// the group only if it reached minGroupSize, and return groups strongest
+// first. Still a heuristic, not an optimal solver — seeds are claimed in
+// order, so an early group can take someone a later group needed more.
 function clusterGroups(pool, settings, travelTimeFn) {
   const sorted = [...pool].sort((a, b) => new Date(a.dob) - new Date(b.dob));
   const used = new Set();
@@ -104,17 +168,37 @@ function clusterGroups(pool, settings, travelTimeFn) {
   for (const seed of sorted) {
     if (used.has(seed.id)) continue;
     const group = [seed];
-    for (const cand of sorted) {
-      if (cand.id === seed.id || used.has(cand.id)) continue;
-      if (group.length >= settings.maxGroupSize) break;
-      if (fitsGroup(cand, group, settings, travelTimeFn)) group.push(cand);
+
+    while (group.length < settings.maxGroupSize) {
+      let best = null;
+      let bestScore = -Infinity;
+      for (const cand of sorted) {
+        if (used.has(cand.id) || group.some((m) => m.id === cand.id)) continue;
+        if (!fitsGroup(cand, group, settings, travelTimeFn)) continue;
+        // Strict > keeps ties with the earlier candidate in `sorted`, so
+        // repeated runs over the same pool give the same groups.
+        const score = scoreGroup([...group, cand], settings, travelTimeFn).total;
+        if (score > bestScore) {
+          bestScore = score;
+          best = cand;
+        }
+      }
+      if (!best) break;
+      group.push(best);
     }
+
     if (group.length >= settings.minGroupSize) {
       group.forEach((m) => used.add(m.id));
       groups.push(group);
     }
   }
-  return groups;
+
+  // Strongest first, so the coordinator reviews the most convincing matches
+  // at the top of the list instead of in seed order.
+  return groups
+    .map((members) => ({ members, score: scoreGroup(members, settings, travelTimeFn).total }))
+    .sort((a, b) => b.score - a.score)
+    .map((g) => g.members);
 }
 
 // Ranked candidates from the unmatched pool who'd fit an existing group's
@@ -143,6 +227,11 @@ const MatchingEngine = {
   formatMonthYear,
   groupAgeRangeLabel,
   pairwiseTravelOk,
+  SCORE_WEIGHTS,
+  travelScore,
+  ageScore,
+  languageScore,
+  scoreGroup,
   fitsGroup,
   clusterGroups,
   findReplacementCandidates,

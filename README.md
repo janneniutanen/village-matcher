@@ -135,11 +135,31 @@ creating those two columns on first run if they are missing.
 already placed, so they drop out of the unmatched pool and appear under that
 village in Active Groups.
 
+## Match quality scoring
+
+Every candidate group gets a 0..1 quality score, used both to grow groups
+(each step adds whichever eligible candidate produces the highest-scoring
+group) and to order the review list so the strongest matches appear first.
+
+| Signal | Weight | What it measures |
+|---|---|---|
+| Travel | 0.5 | Worst pairwise journey as a fraction of that member's own stated limit. Scored on the worst pair, not the average, because a group is only as reachable as its most burdened member. |
+| Age | 0.3 | How tight the baby age spread is, rather than merely staying under `maxAgeGap`. |
+| Language | 0.2 | How much of the members' language repertoires is common ground, so nobody has to fall back to a second language. |
+
+Travel is weighted highest because a group that is awkward to reach won't
+actually meet. The weights live in `SCORE_WEIGHTS` in
+`src/matching-engine.js` if they need tuning.
+
+Scoring only ranks groups that already pass the hard constraints in
+`fitsGroup` (shared language, age gap, travel time within each member's
+limit) — it never lets an ineligible group through.
+
 ## Known simplifications
 
-- Greedy clustering heuristic, not an optimal solver. Candidate groups are
-  formed first-fit in date-of-birth order and listed in the order they were
-  formed — there is no ranking by match quality.
+- Greedy best-fit clustering heuristic, not an optimal solver. Seeds are
+  claimed in date-of-birth order, so an early group can still take someone a
+  later group needed more.
 - Neighbourhood matching is exact-string (sheet typos create separate groups)
 - Per-member outreach stage tracking was removed along with the village
   rewrite. `Match Status` is still written on approval, but the UI no longer

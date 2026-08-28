@@ -180,6 +180,119 @@ test("clusterGroups: adjustable min/max size changes the outcome (e.g. min 3 / m
   assert.equal(groups[0].length, 6, "should grow all the way to the configured max of 6");
 });
 
+// Travel times keyed by the unordered pair, so a stub can grade pairs as
+// "close" vs "just barely acceptable" rather than only pass/fail.
+function makeGradedTravelTime(minutesByPair, fallback = 5) {
+  return (a, b) => {
+    const key = [a.id, b.id].sort().join("-");
+    return key in minutesByPair ? minutesByPair[key] : fallback;
+  };
+}
+
+test("travelScore: a group everyone can reach quickly beats a strained one", () => {
+  const close   = [mom({ id: "A" }), mom({ id: "B" })];
+  const strained = [mom({ id: "C" }), mom({ id: "D" })];
+  const travel  = makeGradedTravelTime({ "A-B": 3, "C-D": 14 });
+  assert.ok(
+    Engine.travelScore(close, travel) > Engine.travelScore(strained, travel),
+    "the closer pair should score higher"
+  );
+});
+
+test("travelScore: measures each leg against that member's own limit", () => {
+  // Same 10-minute journey, but B allows 60 minutes and D allows 12.
+  const generous = [mom({ id: "A", maxTravel: 60 }), mom({ id: "B", maxTravel: 60 })];
+  const tight    = [mom({ id: "C", maxTravel: 12 }), mom({ id: "D", maxTravel: 12 })];
+  const travel   = makeGradedTravelTime({ "A-B": 10, "C-D": 10 });
+  assert.ok(Engine.travelScore(generous, travel) > Engine.travelScore(tight, travel));
+});
+
+test("travelScore: scored on the worst pair, not the average", () => {
+  const members = [mom({ id: "A" }), mom({ id: "B" }), mom({ id: "C" })];
+  // A-B and A-C are instant, but B-C is at the limit.
+  const travel  = makeGradedTravelTime({ "A-B": 0, "A-C": 0, "B-C": 15 });
+  assert.equal(Engine.travelScore(members, travel), 0);
+});
+
+test("ageScore: a tighter age spread scores higher than one at the limit", () => {
+  const settings = { maxAgeGap: 6 };
+  const tight = [mom({ id: "A", dob: "2025-07-01" }), mom({ id: "B", dob: "2025-08-01" })];
+  const wide  = [mom({ id: "C", dob: "2025-01-01" }), mom({ id: "D", dob: "2025-07-01" })];
+  assert.ok(Engine.ageScore(tight, settings) > Engine.ageScore(wide, settings));
+  assert.equal(Engine.ageScore(wide, settings), 0, "a group exactly at maxAgeGap scores 0");
+});
+
+test("languageScore: full overlap scores 1, a single common language out of two scores less", () => {
+  const full = [
+    mom({ id: "A", language: ["Finnish", "English"] }),
+    mom({ id: "B", language: ["Finnish", "English"] }),
+  ];
+  const partial = [
+    mom({ id: "C", language: ["Finnish", "English"] }),
+    mom({ id: "D", language: ["Finnish", "Swedish"] }),
+  ];
+  assert.equal(Engine.languageScore(full), 1);
+  assert.ok(Engine.languageScore(partial) < 1);
+});
+
+test("scoreGroup: total stays within 0..1 and combines all three signals", () => {
+  const settings = { maxAgeGap: 6 };
+  const members  = [mom({ id: "A" }), mom({ id: "B" })];
+  const score    = Engine.scoreGroup(members, settings, makeGradedTravelTime({}));
+  assert.ok(score.total >= 0 && score.total <= 1, `total out of range: ${score.total}`);
+  const weights = Engine.SCORE_WEIGHTS;
+  const expected =
+    weights.travel * score.travel + weights.age * score.age + weights.language * score.language;
+  assert.ok(Math.abs(score.total - expected) < 1e-9);
+});
+
+test("clusterGroups: best-fit picks the stronger candidate, not the first that fits", () => {
+  const settings = { minGroupSize: 2, maxGroupSize: 2, maxAgeGap: 6 };
+  const pool = [
+    mom({ id: "A", dob: "2025-07-01" }),
+    mom({ id: "B", dob: "2025-07-10" }), // earlier in iteration order, but far
+    mom({ id: "C", dob: "2025-07-20" }), // later, but much closer
+  ];
+  // Both fit under the 15-minute cap; C is the better match.
+  const travel = makeGradedTravelTime({ "A-B": 14, "A-C": 3 });
+  const groups = Engine.clusterGroups(pool, settings, travel);
+  assert.equal(groups[0].length, 2);
+  assert.deepEqual(
+    groups[0].map((m) => m.id).sort(),
+    ["A", "C"],
+    "A should pair with C, not with the first candidate that merely fits"
+  );
+});
+
+test("clusterGroups: returns groups strongest first, not in seed order", () => {
+  const settings = { minGroupSize: 3, maxGroupSize: 3, maxAgeGap: 6 };
+  // D/E/F seed first (earlier dobs) but are a strained group; A/B/C are tight.
+  const pool = [
+    mom({ id: "D", dob: "2025-06-01" }),
+    mom({ id: "E", dob: "2025-06-05" }),
+    mom({ id: "F", dob: "2025-06-10" }),
+    mom({ id: "A", dob: "2025-07-01" }),
+    mom({ id: "B", dob: "2025-07-05" }),
+    mom({ id: "C", dob: "2025-07-10" }),
+  ];
+  const travel = makeGradedTravelTime(
+    { "D-E": 14, "D-F": 14, "E-F": 14, "A-B": 2, "A-C": 2, "B-C": 2 },
+    60 // any cross-cluster pair is unreachable, so the two groups stay separate
+  );
+  const groups = Engine.clusterGroups(pool, settings, travel);
+  assert.equal(groups.length, 2);
+  assert.deepEqual(groups[0].map((m) => m.id).sort(), ["A", "B", "C"], "tight group ranks first");
+  assert.deepEqual(groups[1].map((m) => m.id).sort(), ["D", "E", "F"]);
+});
+
+test("clusterGroups: repeated runs over the same pool give the same result", () => {
+  const settings = { minGroupSize: 3, maxGroupSize: 3, maxAgeGap: 6 };
+  const pool = ["A", "B", "C", "D", "E", "F"].map((id) => mom({ id, dob: "2025-07-01" }));
+  const ids = () =>
+    Engine.clusterGroups(pool, settings, makeStubTravelTime()).map((g) => g.map((m) => m.id));
+  assert.deepEqual(ids(), ids());
+});
+
 test("findReplacementCandidates: ranks and limits to 5 fitting candidates", () => {
   const settings = { maxAgeGap: 6 };
   const existingMembers = [mom({ id: "A", coords: [60.18, 24.95] })];
