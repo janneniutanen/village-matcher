@@ -486,9 +486,20 @@ function hasVillage(a) {
 }
 
 function applicantCard(a, mapColor) {
-  const detailRow = (label, value, unsafeValue) => value || unsafeValue || value === 0
-    ? `<div><strong>${label}</strong><span>${value ? escHtml(value) : ''}${unsafeValue ? unsafeValue : ''}</span></div>`
+  const detailRow = (label, value) => value || value === 0
+    ? `<div><strong>${label}</strong><span>${escHtml(value)}</span></div>`
     : '';
+  // wa.me takes digits only, no '+'. A row that failed phone validation is
+  // still shown, but as plain text rather than a link that can't work.
+  const phoneRow = () => {
+    if (!a.phone) return '';
+    const digits = a.phone.replace(/[^\d]/g, '');
+    const shown  = escHtml(a.phone);
+    const body   = digits
+      ? `<a href="https://wa.me/${digits}" rel="noopener noreferrer" target="_blank">${shown}</a>`
+      : shown;
+    return `<div><strong>Phone</strong><span>${body}</span></div>`;
+  };
   const mapDot = mapColor
     ? `<span class="participant-map-dot" style="background:${escHtml(mapColor)}; border-color:${escHtml(mapColor)}" aria-label="Map dot color"></span>`
     : '';
@@ -502,7 +513,7 @@ function applicantCard(a, mapColor) {
       </div>
       <div class="applicant-details" hidden>
         ${detailRow('Name', a.name)}
-        ${detailRow('Phone', undefined, `<a href="https://wa.me/${a.phone.slice(1)}">${a.phone}</a>`)}
+        ${phoneRow()}
         ${detailRow('Baby DOB', MatchingEngine.formatMonthYear(a.dob))}
         ${detailRow('Languages', a.language.join(', '))}
         ${detailRow('Transport', `${a.transport.join('')} ${a.maxTravel}`)}

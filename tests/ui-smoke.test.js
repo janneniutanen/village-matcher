@@ -145,6 +145,37 @@ test("UI smoke: unmatched applicant ID opens row details", async () => {
   assert.match(details.textContent, /Phone/);
 });
 
+test("UI smoke: a malicious phone number is escaped, not injected as markup", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  const victim = window.__test__.state.applicants[0];
+  victim.phone = `+358401234501"><img src=x onerror="window.__pwned=1">`;
+  window.__test__.renderAll();
+
+  const details = window.document.querySelector("#unmatchedList .applicant-details");
+  assert.equal(window.__pwned, undefined, "injected markup must not execute");
+  assert.equal(details.querySelectorAll("img").length, 0, "injected element must not be created");
+
+  const link = details.querySelector('a[href^="https://wa.me/"]');
+  assert.ok(link, "expected a WhatsApp link for a phone number");
+  assert.match(link.getAttribute("href"), /^https:\/\/wa\.me\/\d+$/, "href must be digits only");
+  assert.match(link.textContent, /onerror/, "the raw value is shown as text, not parsed as markup");
+});
+
+test("UI smoke: a blank phone number renders no WhatsApp link", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  const victim = window.__test__.state.applicants[0];
+  victim.phone = "";
+  window.__test__.renderAll();
+
+  const details = window.document.querySelector("#unmatchedList .applicant-details");
+  assert.equal(details.querySelectorAll('a[href^="https://wa.me/"]').length, 0);
+  assert.doesNotMatch(details.textContent, /Phone/);
+});
+
 test("UI smoke: active groups render applicants grouped by village", async () => {
   const window = buildWindow();
   await window.__test__.init();
