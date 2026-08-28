@@ -226,12 +226,6 @@ async function computeCandidateGroups() {
   }));
 }
 
-function findReplacementCandidates(group) {
-  const members = group.memberIds.map((id) => getApplicant(id));
-  const pool    = state.applicants.filter((a) => a.matchStatus === 'unmatched' && a.eligibleForMatching);
-  return MatchingEngine.findReplacementCandidates(members, pool, state.settings, getTravelMinutes);
-}
-
 // ---------------------------------------------------------------------------
 // Data mutations
 // ---------------------------------------------------------------------------
@@ -284,18 +278,6 @@ function markStatus(applicantId, status) {
   renderAll();
 }
 
-function assignReplacement(groupId, applicantId) {
-  const group = state.groups.find((g) => g.id === groupId);
-  if (!group) return;
-  group.memberIds.push(applicantId);
-  const a = getApplicant(applicantId);
-  a.matchStatus  = 'match_found';
-  a.matchGroupId = groupId;
-  syncToBackend('updateApplicant', { id: applicantId, fields: { matchStatus: 'match_found', matchGroupId: groupId } });
-  syncToBackend('updateGroup', { id: groupId, fields: { memberIds: group.memberIds } });
-  renderAll();
-}
-
 // ---------------------------------------------------------------------------
 // WhatsApp helpers
 // ---------------------------------------------------------------------------
@@ -315,12 +297,6 @@ function waLink(applicant, template, group) {
   const digits = applicant.phone.replace(/[^\d]/g, '');
   const text   = encodeURIComponent(fillTemplate(template, applicant, group));
   return `https://wa.me/${digits}?text=${text}`;
-}
-
-function stageTemplateFor(status) {
-  if (status === 'unmatched' || status === 'match_found') return state.templates.firstContact;
-  if (status === 'contacted') return state.templates.confirmationAsk;
-  return state.templates.introduction;
 }
 
 // ---------------------------------------------------------------------------
@@ -421,12 +397,6 @@ async function drawOverlap(candidateId) {
 
 const FLAG_MAP = { English: '🇬🇧', Finnish: '🇫🇮', Swedish: '🇸🇪', Russian: '🇷🇺', Arabic: '🇸🇦', French: '🇫🇷', Swahili: '🇰🇪' };
 const MODE_ICON = { W: '🚶', D: '🚙', P: '🚌', B: '🚲' };
-
-function codedLine(a) {
-  const flags = a.language.map((l) => FLAG_MAP[l] || escHtml(l)).join('');
-  const modes = a.transport.map((m) => MODE_ICON[m] || escHtml(m)).join('');
-  return `<strong>${escHtml(a.id)}</strong> ${escHtml(a.name)} ${flags} ${MatchingEngine.formatMonthYear(a.dob)} ${modes}${a.maxTravel}`;
-}
 
 function renderCandidateCards() {
   const container = document.getElementById('candidateCards');
@@ -541,12 +511,6 @@ function attachApplicantDetailToggles(container) {
   });
 }
 
-function statusStepper(current) {
-  const stages = ['unmatched', 'match_found', 'contacted', 'confirmed', 'introduced'];
-  const idx    = stages.indexOf(current);
-  return `<div class="stepper">${stages.map((s, i) => `<span class="step ${i <= idx ? 'step-done' : ''} ${i === idx ? 'step-current' : ''}">${s}</span>`).join('')}</div>`;
-}
-
 function renderActiveGroups() {
   const container      = document.getElementById('activeGroups');
   const reviewContainer = document.getElementById('needsReview');
@@ -588,36 +552,6 @@ function renderActiveGroups() {
   });
 
   attachApplicantDetailToggles(container);
-
-  container.querySelectorAll('button[data-action]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.id;
-      if (btn.dataset.action === 'advance') {
-        const stages = ['unmatched', 'match_found', 'contacted', 'confirmed', 'introduced'];
-        const a      = getApplicant(id);
-        const idx    = stages.indexOf(a.matchStatus);
-        if (idx === -1 || idx === stages.length - 1) return;
-        markStatus(id, stages[idx + 1]);
-      }
-      if (btn.dataset.action === 'decline') markStatus(id, 'declined');
-      if (btn.dataset.action === 'copy') {
-        const group   = state.groups.find((g) => g.id === id);
-        const numbers = group.memberIds.map((mid) => getApplicant(mid).phone).join(', ');
-        navigator.clipboard?.writeText(numbers).catch(() => {});
-        btn.textContent = 'Copied!';
-        setTimeout(() => (btn.textContent = 'Copy phone numbers'), 1500);
-      }
-      if (btn.dataset.action === 'suggest') {
-        const group       = state.groups.find((g) => g.id === id);
-        const suggestions = findReplacementCandidates(group);
-        const box         = document.getElementById(`suggestions-${id}`);
-        box.innerHTML = suggestions.length
-          ? suggestions.map((s) => `<div class="mini-card"><span>${codedLine(s)}</span><button data-action="assign" data-group="${escHtml(id)}" data-id="${escHtml(s.id)}">Add to group</button></div>`).join('')
-          : `<div class="empty-state">No one in the unmatched pool currently fits this group.</div>`;
-        box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => assignReplacement(b.dataset.group, b.dataset.id)));
-      }
-    });
-  });
 
   reviewContainer.querySelectorAll('button').forEach((btn) => {
     btn.addEventListener('click', () => markStatus(btn.dataset.id, 'unmatched'));

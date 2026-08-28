@@ -209,8 +209,6 @@ button:hover { background: var(--surface-muted); }
   border-radius: 999px;
 }
 .badge-pending { background: var(--warning-bg); color: var(--warning-text); }
-.badge-open { background: var(--warning-bg); color: var(--warning-text); }
-.badge-established { background: var(--success-bg); color: var(--success-text); }
 .badge-muted { background: var(--surface-muted); color: var(--text-muted); }
 
 .card-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
@@ -265,34 +263,6 @@ button:hover { background: var(--surface-muted); }
   border-radius: 8px;
 }
 
-.member-row {
-  border-top: 1px solid var(--border);
-  padding: 10px 0;
-}
-.member-row:first-of-type { border-top: none; padding-top: 0; }
-
-.stepper { display: flex; gap: 4px; margin: 6px 0; flex-wrap: wrap; }
-.step {
-  font-size: 10.5px;
-  padding: 2px 8px;
-  border-radius: 999px;
-  background: var(--surface-muted);
-  color: var(--text-muted);
-}
-.step-done { background: var(--success-bg); color: var(--success-text); }
-.step-current { background: var(--accent); color: #fff; }
-
-.member-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 4px; }
-.wa-link {
-  font-size: 13px;
-  color: var(--accent-dark);
-  text-decoration: none;
-  border: 1px solid var(--accent);
-  border-radius: 8px;
-  padding: 6px 10px;
-}
-.wa-link:hover { background: var(--surface-muted); }
-
 .needs-review {
   display: none;
   background: var(--danger-bg);
@@ -302,9 +272,6 @@ button:hover { background: var(--surface-muted); }
 }
 .review-title { font-weight: 600; color: var(--danger-text); margin-bottom: 8px; }
 .review-item { background: #fff; }
-
-.replacement-suggestions { margin-top: 10px; }
-.replacement-suggestions .mini-card { margin-bottom: 6px; }
 
 .issue-card {
   background: var(--danger-bg);

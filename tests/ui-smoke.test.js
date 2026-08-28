@@ -104,7 +104,7 @@ function buildWindow() {
   const hook = window.document.createElement("script");
   hook.textContent = `window.__test__ = {
     get state() { return state; },
-    computeCandidateGroups, approveGroup, rejectGroup, markStatus, assignReplacement,
+    computeCandidateGroups, approveGroup, rejectGroup, markStatus,
     getApplicant, renderCandidateCards, renderAll, waLink, syncToBackend, init,
     populateNeighborhoodFilter, renderSettingsTab,
   };`;
