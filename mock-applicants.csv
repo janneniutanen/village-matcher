@@ -1,19 +1,151 @@
 Identity number,Village,Mum's status,Village status,My notes,Timestamp,Name,Neighbourhood,Street address,Transport,Language,Phone number,Email,worries,hopes,questions,travel time,amount of children,Date of birth,Older child,source
-A001,,,,,2026-06-01 10:00:00,Lisa,Kallio,Vaasankatu 5,"bus, car, walk","Russian, English",0401234501,,"New to Finland, wants Russian-speaking friends",Weekly meetups,,15,1,2025-07-10,,Facebook
-A002,,,,,2026-06-01 10:00:00,Anni,Kallio,Helsinginkatu 12,"bus, walk","Finnish, English",0401234502,,,Someone within walking distance,,10,1,2025-09-02,,Neuvola
-A003,,,,,2026-06-01 10:00:00,Sara,Kallio,Sturenkatu 20,car,Finnish,0401234503,,,,Can toddlers join too?,15,2,2025-06-18,03.2022,Friend
-A004,,,,,2026-06-01 10:00:00,Mia,Töölö,Runeberginkatu 8,bus,"Swedish, English",0401234504,,"First baby, feeling isolated",,,20,1,2025-08-22,,Instagram
-A005,,,,,2026-06-01 10:00:00,Katri,Töölö,Topeliuksenkatu 15,"car, walk","Finnish, English",0401234505,,,,,12,1,2025-07-30,,Neuvola
-A006,,,,,2026-06-01 10:00:00,Nour,Töölö,Mannerheimintie 60,"bus, walk","Finnish, Arabic",0401234506,,Language barrier,Practice Finnish with other mums,,15,1,2025-09-14,,Facebook
-A007,,,,,2026-06-01 10:00:00,Elin,Töölö,Nordenskiöldinkatu 3,car,"Swedish, Finnish",0401234507,,,,,20,1,2025-06-05,,Friend
-A008,,,,,2026-06-01 10:00:00,Pia,Espoo keskus,Kirkkojärventie 4,walk,Finnish,0401234508,,Far from other applicants so far,,,8,1,2025-11-01,,Neuvola
-A009,,,,,2026-06-01 10:00:00,Reetta,Espoo keskus,Kamreerintie 2,"car, walk","Finnish, English",0401234509,,,,,10,1,2025-10-20,,Facebook
-A010,,,,,2026-06-01 10:00:00,Johanna,Kamppi,Fredrikinkatu 30,"bus, car","Finnish, English",0401234510,,,Coffee walks,,15,1,2025-08-08,,Instagram
-A011,,,,,2026-06-01 10:00:00,Camille,Kamppi,Runeberginkatu 2,"walk, bus","French, English",0401234511,,New in the city,,,12,1,2025-07-25,,Facebook
-A012,,,,,2026-06-01 10:00:00,Ines,Kruununhaka,Kirkkokatu 10,"walk, car","Finnish, English",0401234512,,,,,15,1,2025-09-28,,Neuvola
-A013,,,,,2026-06-01 10:00:00,Hanna,Punavuori,Iso Roobertinkatu 9,"bus, walk",Finnish,0401234513,,,,,15,1,2025-06-30,,Friend
-A014,,,,,2026-06-01 10:00:00,Amara,Kallio,Porthaninkatu 7,"bus, car, walk","English, Swahili",0401234514,,,,,15,1,2025-08-15,,Facebook
-A015,,,,,2026-06-01 10:00:00,Venla,Kallio,Aleksis Kiven katu 20,car,"Finnish, English",0401234515,,,,,25,1,2025-05-30,,Neuvola
-A016,,,,,2026-06-01 10:00:00,Outi,Kallio,Fleminginkatu 9,skateboard,Finnish,0401234516,,,,,15,1,2025-07-01,,Facebook
+A001,,,,,2026-06-01 10:00:00,Siiri,Munkkiniemi,Munkkiniemen puistotie 59,car,"Finnish, English",040 100 7919,,Language barrier at the playground,Coffee walks,Can toddlers join too?,Doesn't matter,2,2026-08-05,05.2023,Midwife
+A002,,,,,2026-06-01 10:00:00,Shreya,Nurmijärvi,Punamullantie 47,"bus, train","Hindi, English",+358451015838,,Worried about winter with a newborn,,Can I join if I move in spring?,35,1,2026-07-14,,Word of mouth
+A003,,,,,2026-06-01 10:00:00,Tetiana,Oulunkylä,Mäkitorpantie 57,"public transport, walk","Ukrainian, English, Finnish",0451023757,,,Evening meetups after partner is home,,about 20 min,2,2026-07-01,06.2022,Friend
+A004,,,,,2026-06-01 10:00:00,Nusrat,Itäkeskus,Itäkatu 1,walk,"Bengali, English, Finnish",0451031676,,,Practise Finnish with other mums,Are meetings in Finnish or English?,45,1,2025-09-16,,Työväenopisto
+A005,,,,,2026-06-01 10:00:00,Ubah,Martinlaakso,Louhelantie 50,"public transport, walk",Somali,0451039595,,,,Can toddlers join too?,35,1,2025-06-26,,Family clinic
+A006,,,,,2026-06-01 10:00:00,Layla,Inkoo,Rantatie 35,"walk, bus","Arabic, Finnish",+358401047514,,Shy about meeting new people,Practise Finnish with other mums,,35,1,2026-02-20,,Friend
+A007,,,,,2026-06-01 10:00:00,Svetlana,Kauklahti,Kauklahdenväylä 58,walk,"Russian, English",+358451055433,,Language barrier at the playground,Weekly meetups,Are partners welcome sometimes?,30,1,2025-02-18,,Family clinic
+A008,,,,,2026-06-01 10:00:00,Minna,Vuosaari,Kauppakartanonkatu 6,car,"Finnish, English",0441063352,,Moved here recently for work,Practise Finnish with other mums,,30 minutes,1,2026-04-06,,Library
+A009,,,,,2026-06-01 10:00:00,Katri,Pasila,Kyllikinportti 68,"public transport, walk","Finnish, English",0411071271,,Long distance to nearest group,Someone in the same situation,Are partners welcome sometimes?,10,1,2026-08-08,,Työväenopisto
+A010,,,,,2026-06-01 10:00:00,Emilia,Punavuori,Tehtaankatu 49,car,"Finnish, English",0441079190,,Long distance to nearest group,Practise Finnish with other mums,,15,1,2026-08-02,,Peer group
+A011,,,,,2026-06-01 10:00:00,Noora,Tikkurila,Asematie 31,"bicycle, walk","Finnish, English",+358411087109,,,Evening meetups after partner is home,,20,1,2026-01-03,,Peer group
+A012,,,,,2026-06-01 10:00:00,Alina,Kannelmäki,Kanneltie 48,"car, walk","Russian, Finnish",0451095028,,Worried about winter with a newborn,Practise Finnish with other mums,Can I join if I move in spring?,20,1,2026-09-11,,Instagram
+A013,,,,,2026-06-01 10:00:00,Anastasia,Töölö,Museokatu 15,"walk, bus","Russian, Swedish",0401102947,,Feeling isolated on parental leave,A group that meets at weekends,Is it free?,15,2,2026-08-05,11.2022,Työväenopisto
+A014,,,,,2026-06-01 10:00:00,Sarita,Myyrmäki,Vaskivuorentie 41,"walk, bus",Nepali,0411110866,,Feeling isolated on parental leave,Outdoor walks with prams,Can toddlers join too?,60,1,2025-12-25,,Word of mouth
+A015,,,,,2026-06-01 10:00:00,Aino,Kallio,Vaasankatu 22,bicycle,"Finnish, English",0451118785,,Shy about meeting new people,Someone within walking distance,,45 min,1,2025-01-23,,Family clinic
+A016,,,,,2026-06-01 10:00:00,Ploy,Herttoniemi,Mekaanikonkatu 48,"bicycle, walk","Thai, English",+358401126704,,"First baby, very little support nearby",Evening meetups after partner is home,Are partners welcome sometimes?,15,1,2024-12-04,,Facebook
+A017,,,,,2026-06-01 10:00:00,Roosa,Pornainen,Kirkkotie 24,walk,"Finnish, English",0451134623,,Feeling isolated on parental leave,,Is it free?,20,1,2026-05-10,,Family clinic
+A018,,,,,2026-06-01 10:00:00,Isabel,Tuusula,Tuusulantie 50,bus,"Spanish, English",0441142542,,Shy about meeting new people,Someone within walking distance,Are meetings in Finnish or English?,45,1,2026-05-23,,Facebook
+A019,,,,,2026-06-01 10:00:00,Pia,Kallio,Porthaninkatu 60,"walk, bus, car",Finnish,0441150461,,"Struggling with sleep, wants company",A group that meets at weekends,Are meetings in Finnish or English?,45 min,1,2026-01-23,,Family clinic
+A020,,,,,2026-06-01 10:00:00,Agnieszka,Martinlaakso,Louhelantie 13,"public transport, walk","Polish, English, Finnish",0501158380,,Feeling isolated on parental leave,Baby swimming buddies,Are partners welcome sometimes?,25,1,2025-07-15,,Työväenopisto
+A021,,,,,2026-06-01 10:00:00,Greta,Leppävaara,Sellonkuja 1,"public transport, walk","German, English, Finnish",0401166299,,Feeling isolated on parental leave,Friends for the baby too,Can I join if I move in spring?,60,1,2026-07-27,,Friend
+A022,,,,,2026-06-01 10:00:00,Milla,Töölö,Topeliuksenkatu 66,"taxi, bus","Finnish, English",+358 41 117 4218,,"Struggling with sleep, wants company",Baby swimming buddies,,15,1,2026-06-04,,Työväenopisto
+A023,,,,,2026-06-01 10:00:00,Ubah,Aviapolis,Äyritie 4,tram,Somali,0401182137,,"First baby, very little support nearby",Friends for the baby too,Is it free?,30,1,2025-12-16,,Friend
+A024,,,,,2026-06-01 10:00:00,Siiri,Nurmijärvi,Kirkkotie 5,"bus, car, walk","Finnish, English",050 119 0056,,Long distance to nearest group,Weekly meetups,Are partners welcome sometimes?,Doesn't matter,1,2026-05-11,,Työväenopisto
+A025,,,,,2026-06-01 10:00:00,Zeynep,Pukinmäki,Eskolantie 10,car,"Turkish, English, Finnish",+46 70 119797,,"First baby, very little support nearby",Someone in the same situation,,about 20 min,1,2024-07-06,,Neuvola
+A026,,,,,2026-06-01 10:00:00,Alina,Porvoo,Aleksanterinkatu 36,"walk, bus","Russian, English",0451205894,,,Coffee walks,What if my baby is older than the others?,45 min,2,2025-11-22,02.2021,Työväenopisto
+A027,,,,,2026-06-01 10:00:00,Liis,Porvoo,Rihkamakatu 57,"bicycle, walk","Estonian, English, Finnish",0401213813,,Long distance to nearest group,Someone within walking distance,,about 20 min,2,2026-02-18,08.2021,Word of mouth
+A028,,,,,2026-06-01 10:00:00,Reetta,Kruununhaka,Snellmaninkatu 20,"bus, car, walk","Finnish, English",0401221732,,Worried about winter with a newborn,,Can toddlers join too?,15,1,2026-03-03,,Työväenopisto
+A029,,,,,2026-06-01 10:00:00,Magdalena,Inkoo,Rantatie 2,"bus, car, walk","Polish, English, Finnish",0441229651,,Long distance to nearest group,Evening meetups after partner is home,,15,1,2025-12-20,,Työväenopisto
+A030,,,,,2026-06-01 10:00:00,Oona,Töölö,Runeberginkatu 51,"bicycle, public transport","Finnish, English, Swedish",0411237570,,"Partner works shifts, often alone",Just someone to talk to,,25,1,2025-10-07,,Instagram
+A031,,,,,2026-06-01 10:00:00,Liis,Espoonlahti,Espoonlahdenkatu 15,"bus, bicycle",Estonian,0501245489,,,Someone in the same situation,Can toddlers join too?,35,1,2025-05-09,,Facebook
+A032,,,,,2026-06-01 10:00:00,Johanna,Tapiola,Länsituulentie 13,"bicycle, walk","Finnish, English",0441253408,,Feeling isolated on parental leave,Friends for the baby too,,15,1,2025-09-02,,Facebook
+A033,,,,,2026-06-01 10:00:00,Iida,Kamppi,Kalevankatu 37,"bus, walk","Finnish, English",0501261327,,Shy about meeting new people,,Are meetings in Finnish or English?,10,3,2024-10-12,09.2022,Facebook
+A034,,,,,2026-06-01 10:00:00,Anjali,Tapiola,Merituulentie 42,"bus, bicycle","Hindi, English",+358 45 126 9246,,,Friends for the baby too,,10,1,2026-07-24,,Midwife
+A035,,,,,2026-06-01 10:00:00,Yulia,Herttoniemi,Mekaanikonkatu 3,"tram, walk","Russian, English, Finnish",0401277165,,Long distance to nearest group,Friends for the baby too,,Doesn't matter,1,2025-09-25,,Friend
+A036,,,,,2026-06-01 10:00:00,Fatima,Malmi,Kirkonkyläntie 35,public transport,"Arabic, English, Finnish",0451285084,,Language barrier at the playground,Someone in the same situation,Is it free?,Doesn't matter,1,2026-08-16,,Midwife
+A037,,,,,2026-06-01 10:00:00,Roosa,Askola,Monninkyläntie 25,walk,"Finnish, English",0411293003,,,Friends for the baby too,Can toddlers join too?,about 20 min,1,2025-11-03,,Midwife
+A038,,,,,2026-06-01 10:00:00,Fatima,Pasila,Kyllikinportti 35,"train, walk","Arabic, English, Finnish",0401300922,,No family in Finland,Coffee walks,How often do groups meet?,25,2,2026-09-02,07.2022,Facebook
+A039,,,,,2026-06-01 10:00:00,Shathi,Hakunila,Laukkarinne 60,"walk, bus","Bengali, English, Finnish",+358501308841,,Moved here recently for work,,Is it free?,45,1,2025-10-07,,Työväenopisto
+A040,,,,,2026-06-01 10:00:00,Anni,Hanko,Bulevardi 68,"tram, walk","Finnish, English",0401316760,,,Weekly meetups,Are partners welcome sometimes?,Doesn't matter,1,2025-06-03,,Instagram
+A041,,,,,2026-06-01 10:00:00,Anni,Kauklahti,Hansatie 30,"walk, car","Finnish, English",0411324679,,"Struggling with sleep, wants company",Baby swimming buddies,Can toddlers join too?,Doesn't matter,4,2025-11-23,08.2021,Friend
+A042,,,,,2026-06-01 10:00:00,Linh,Itäkeskus,Turunlinnantie 58,"bus, car, walk","Vietnamese, English, Finnish",+358 41 133 2598,,"New to Finland, doesn't know anyone yet",Evening meetups after partner is home,Are partners welcome sometimes?,20,4,2026-09-01,12.2022,Friend
+A043,,,,,2026-06-01 10:00:00,Veera,Siuntio,Asemantie 7,"bicycle, public transport","Finnish, English",0451340517,,"Partner works shifts, often alone",Evening meetups after partner is home,What if my baby is older than the others?,45,1,2025-04-26,,Library
+A044,,,,,2026-06-01 10:00:00,Sofiia,Herttoniemi,Linnanrakentajantie 22,"bus, walk","Ukrainian, English",044 134 8436,,Shy about meeting new people,A group that meets at weekends,,30 minutes,1,2026-08-25,,Family clinic
+A045,,,,,2026-06-01 10:00:00,Shirin,Aviapolis,Lentäjäntie 42,tram,"Persian, English, Finnish",0401356355,,"First baby, very little support nearby",,How often do groups meet?,40,3,2025-10-06,12.2022,Doula
+A046,,,,,2026-06-01 10:00:00,Laura,Lohja,Karstuntie 60,"bus, car, walk","Finnish, English",0441364274,,Worried about winter with a newborn,Just someone to talk to,,20,1,2025-10-09,,Työväenopisto
+A047,,,,,2026-06-01 10:00:00,Charlotte,Kirkkonummi,Kirkkotallintie 60,"bus, car, walk",English,0401372193,,"New to Finland, doesn't know anyone yet",A group that meets at weekends,How often do groups meet?,40,3,2026-08-18,12.2021,Facebook
+A048,,,,,2026-06-01 10:00:00,Parisa,Pihlajamäki,Liusketie 11,"car, public transport","Persian, Finnish",0501380112,,Long distance to nearest group,Weekly meetups,,45 min,1,2025-03-22,,Library
+A049,,,,,2026-06-01 10:00:00,Katrin,Pukinmäki,Eskolantie 53,"walk, bus, car","Estonian, English, Finnish",0411388031,,,Outdoor walks with prams,How often do groups meet?,30 minutes,1,2025-08-16,,Family clinic
+A050,,,,,2026-06-01 10:00:00,Karolina,Kauniainen,Promenadi 20,"walk, car","Polish, English, Swedish",0411395950,,"Struggling with sleep, wants company",,Are partners welcome sometimes?,30,1,2025-01-14,,Doula
+A051,,,,,2026-06-01 10:00:00,Giulia,Matinkylä,Piispansilta 7,tram,"Italian, English",0501403869,,Feeling isolated on parental leave,Weekly meetups,,20,1,2026-04-21,,Neuvola
+A052,,,,,2026-06-01 10:00:00,Parisa,Herttoniemi,Hiihtomäentie 2,"train, walk","Persian, English",0441411788,,No family in Finland,Someone in the same situation,,60,1,2024-04-05,,Family clinic
+A053,,,,,2026-06-01 10:00:00,Nasrin,Otaniemi,Metallimiehenkuja 20,"car, walk",Persian,045 141 9707,,"Struggling with sleep, wants company",Outdoor walks with prams,Are partners welcome sometimes?,30 minutes,2,2025-03-06,06.2022,Facebook
+A054,,,,,2026-06-01 10:00:00,Taru,Martinlaakso,Louhelantie 15,"walk, car","Finnish, English",0411427626,,"Partner works shifts, often alone",Someone within walking distance,Can toddlers join too?,30,1,2026-09-07,,Facebook
+A055,,,,,2026-06-01 10:00:00,Isabel,Kruununhaka,Mariankatu 8,"walk, bus","Spanish, English",0411435545,,,,Can I join if I move in spring?,30,1,2026-07-28,,Instagram
+A056,,,,,2026-06-01 10:00:00,Hodan,Matinkylä,Matinkatu 62,"bicycle, walk","Somali, English",0501443464,,Language barrier at the playground,Evening meetups after partner is home,Are meetings in Finnish or English?,30,1,2026-06-12,,Facebook
+A057,,,,,2026-06-01 10:00:00,Ksenia,Kauklahti,Hansatie 4,"walk, bus","Russian, Finnish",0451451383,,No family in Finland,Someone within walking distance,How often do groups meet?,Doesn't matter,1,2026-03-03,,Työväenopisto
+A058,,,,,2026-06-01 10:00:00,Heidi,Leppävaara,Leppävaarankatu 20,"walk, bicycle, bus","Finnish, English",044 145 9302,,"New to Finland, doesn't know anyone yet",A group that meets at weekends,,about 20 min,1,2026-06-19,,Family clinic
+A059,,,,,2026-06-01 10:00:00,Dilan,Munkkiniemi,Laajalahdentie 42,"bicycle, walk",Kurdish,0441467221,,"Struggling with sleep, wants company",Practise Finnish with other mums,,20,4,2025-09-11,11.2022,Facebook
+A060,,,,,2026-06-01 10:00:00,Rojin,Vuosaari,Punakiventie 11,"walk, bicycle, bus","Kurdish, English",041 147 5140,,"New to Finland, doesn't know anyone yet",A group that meets at weekends,,60,1,2025-09-23,,Instagram
+A061,,,,,2026-06-01 10:00:00,Elif,Kauniainen,Kauniaistentie 43,"bus, car, walk","Turkish, English",0401483059,,Moved here recently for work,,Can toddlers join too?,about 20 min,1,2025-08-23,,Doula
+A062,,,,,2026-06-01 10:00:00,Hodan,Punavuori,Pursimiehenkatu 61,"public transport, walk","Somali, English",044 149 0978,,Long distance to nearest group,,How often do groups meet?,30 minutes,1,2024-03-22,,Family clinic
+A063,,,,,2026-06-01 10:00:00,Sarita,Lohja,Laurinkatu 68,"public transport, walk","Nepali, English",+358 40 149 8897,,No family in Finland,Practise Finnish with other mums,Is it free?,Doesn't matter,1,2025-09-03,,Peer group
+A064,,,,,2026-06-01 10:00:00,Anastasia,Raasepori,Rautatienkatu 61,"tram, walk","Russian, English",0401506816,,,Friends for the baby too,What if my baby is older than the others?,45,1,2026-08-18,,Friend
+A065,,,,,2026-06-01 10:00:00,Rosalie,Itäkeskus,Itäkatu 16,"bus, walk","Tagalog, English",0401514735,,Worried about winter with a newborn,,Can I join if I move in spring?,15,1,2025-10-14,,Doula
+A066,,,,,2026-06-01 10:00:00,Hannah,Siuntio,Asemantie 46,"bus, car, walk",English,0411522654,,Long distance to nearest group,,Are meetings in Finnish or English?,10,3,2025-11-01,06.2021,Peer group
+A067,,,,,2026-06-01 10:00:00,Minna,Kauniainen,Asematie 8,"bus, train","Finnish, English",0451530573,,Moved here recently for work,A group that meets at weekends,Are meetings in Finnish or English?,25,4,2025-10-19,02.2022,Midwife
+A068,,,,,2026-06-01 10:00:00,Léa,Pasila,Asemapäällikönkatu 49,train,"French, English, Finnish",0411538492,,"First baby, very little support nearby",Baby swimming buddies,Is it free?,25,1,2025-03-18,,Instagram
+A069,,,,,2026-06-01 10:00:00,Priya,Oulunkylä,Käskynhaltijantie 31,"walk, bus, car","Hindi, English",0401546411,,Shy about meeting new people,Baby swimming buddies,Can toddlers join too?,Doesn't matter,1,2026-02-21,,Doula
+A070,,,,,2026-06-01 10:00:00,Sofiia,Espoon keskus,Kirkkojärventie 6,"bicycle, walk","Ukrainian, Finnish",0441554330,,"Partner works shifts, often alone",,,15,1,2025-11-17,,Doula
+A071,,,,,2026-06-01 10:00:00,Nour,Loviisa,Kuningattarenkatu 35,"walk, car","Arabic, English",0401562249,,,A group that meets at weekends,,20,1,2025-05-05,,Neuvola
+A072,,,,,2026-06-01 10:00:00,Hodan,Kannelmäki,Kanneltie 16,"walk, car","Somali, English",0451570168,,,Coffee walks,Are meetings in Finnish or English?,30 minutes,1,2025-09-21,,Työväenopisto
+A073,,,,,2026-06-01 10:00:00,Elina,Hyvinkää,Uudenmaankatu 13,"bus, bicycle","Finnish, English",+358 50 157 8087,,,,,20,2,2026-07-15,01.2023,Peer group
+A074,,,,,2026-06-01 10:00:00,Yan,Hakunila,Hakunilantie 64,"car, public transport","Chinese, English, Finnish",+358 40 158 6006,,Language barrier at the playground,A group that meets at weekends,Can I join if I move in spring?,60,3,2026-09-12,03.2025,Neuvola
+A075,,,,,2026-06-01 10:00:00,Ines,Vuosaari,Punakiventie 41,"bus, walk","Portuguese, English",0441593925,,,Friends for the baby too,Is it free?,25,1,2026-04-13,,Peer group
+A076,,,,,2026-06-01 10:00:00,Aino,Vihti,Nummelantie 5,"bicycle, public transport",Finnish,0441601844,,,,,30 minutes,3,2026-06-12,08.2022,Instagram
+A077,,,,,2026-06-01 10:00:00,Heidi,Järvenpää,Sibeliuksenkatu 63,"car, walk","Finnish, English",0501609763,,,Coffee walks,,30,1,2026-06-20,,Instagram
+A078,,,,,2026-06-01 10:00:00,Grace,Pasila,Ratapihantie 48,"walk, bicycle, bus",English,045 161 7682,,Worried about winter with a newborn,,Can I join if I move in spring?,35,3,2025-06-07,10.2021,Neuvola
+A079,,,,,2026-06-01 10:00:00,Svetlana,Pihlajamäki,Liusketie 57,"walk, bicycle, bus",Russian,0451625601,,"First baby, very little support nearby",Practise Finnish with other mums,,30,1,2026-06-20,,Library
+A080,,,,,2026-06-01 10:00:00,Maja,Lauttasaari,Isokaari 57,bicycle,"Swedish, English",0441633520,,,Just someone to talk to,How often do groups meet?,10,1,2026-01-02,,Library
+A081,,,,,2026-06-01 10:00:00,Svetlana,Kallio,Sturenkatu 32,"car, walk","Russian, English, Finnish",0501641439,,"Struggling with sleep, wants company",,Is it free?,60,1,2026-09-21,,Word of mouth
+A082,,,,,2026-06-01 10:00:00,Olivia,Soukka,Soukanahde 16,"bus, bicycle",English,0501649358,,Moved here recently for work,,,25,1,2025-07-01,,Facebook
+A083,,,,,2026-06-01 10:00:00,Iryna,Lauttasaari,Gyldenintie 27,"train, walk","Ukrainian, English, Finnish",0441657277,,"Struggling with sleep, wants company",Weekly meetups,,15,1,2026-09-19,,Library
+A084,,,,,2026-06-01 10:00:00,Helmi,Askola,Askolantie 34,car,"Finnish, English",0411665196,,,Coffee walks,How often do groups meet?,15,4,2026-09-24,04.2024,Instagram
+A085,,,,,2026-06-01 10:00:00,Piret,Pukinmäki,Eskolantie 3,car,"Estonian, English, Finnish",0441673115,,"Struggling with sleep, wants company",Outdoor walks with prams,Are partners welcome sometimes?,30,1,2026-01-25,,Doula
+A086,,,,,2026-06-01 10:00:00,Malee,Pornainen,Mika Waltarin tie 16,walk,"Thai, English",0501681034,,"Partner works shifts, often alone",A group that meets at weekends,,20,3,2025-05-03,08.2020,Peer group
+A087,,,,,2026-06-01 10:00:00,Piret,Oulunkylä,Käskynhaltijantie 18,walk,Estonian,0501688953,,,,Are meetings in Finnish or English?,25,4,2024-10-27,02.2020,Työväenopisto
+A088,,,,,2026-06-01 10:00:00,Piret,Punavuori,Tehtaankatu 22,"bus, bicycle","Estonian, Finnish",0401696872,,Feeling isolated on parental leave,Coffee walks,Can I join if I move in spring?,60,1,2025-06-21,,Family clinic
+A089,,,,,2026-06-01 10:00:00,Ruth,Espoonlahti,Espoonlahdenkatu 13,"bus, walk","English, Finnish",0401704791,,Worried about winter with a newborn,Evening meetups after partner is home,Can I join if I move in spring?,45,1,2024-12-15,,Friend
+A090,,,,,2026-06-01 10:00:00,Fatima,Kerava,Aleksis Kiven tie 32,bus,"Arabic, English, Finnish",0411712710,,Moved here recently for work,Just someone to talk to,,about 20 min,1,2025-08-15,,Työväenopisto
+A091,,,,,2026-06-01 10:00:00,Isabel,Mäntsälä,Sälinkääntie 8,"car, public transport",Spanish,+358451720629,,Shy about meeting new people,Evening meetups after partner is home,How often do groups meet?,45,1,2026-04-22,,Instagram
+A092,,,,,2026-06-01 10:00:00,Mei,Punavuori,Tehtaankatu 2,"car, walk","Chinese, Finnish",0441728548,,"New to Finland, doesn't know anyone yet",Baby swimming buddies,,40,4,2024-08-21,03.2022,Neuvola
+A093,,,,,2026-06-01 10:00:00,Huong,Aviapolis,Äyritie 45,walk,"Vietnamese, English",0501736467,,,Someone within walking distance,Are partners welcome sometimes?,30 minutes,1,2026-08-05,,Midwife
+A094,,,,,2026-06-01 10:00:00,Tetiana,Vuosaari,Mosaiikkitori 60,"bus, bicycle","Ukrainian, English",0411744386,,Feeling isolated on parental leave,Someone within walking distance,Are meetings in Finnish or English?,35,1,2025-09-05,,Työväenopisto
+A095,,,,,2026-06-01 10:00:00,Emilia,Myyrmäki,Myyrmäenraitti 41,"bus, bicycle","Finnish, English",0451752305,,No family in Finland,,What if my baby is older than the others?,15,1,2025-12-17,,Neuvola
+A096,,,,,2026-06-01 10:00:00,Deqa,Tikkurila,Asematie 38,public transport,"Somali, English",044 176 0224,,Language barrier at the playground,Someone within walking distance,Can toddlers join too?,60,3,2024-12-28,07.2020,Facebook
+A097,,,,,2026-06-01 10:00:00,Natalia,Munkkiniemi,Munkkiniemen puistotie 23,"bus, train","Russian, Finnish",0441768143,,"First baby, very little support nearby",Coffee walks,Can toddlers join too?,25,1,2025-09-07,,Facebook
+A098,,,,,2026-06-01 10:00:00,Yulia,Myyrmäki,Iskoskuja 36,"bus, train","Russian, English",050 177 6062,,Shy about meeting new people,Someone in the same situation,Can toddlers join too?,15,1,2025-04-01,,Peer group
+A099,,,,,2026-06-01 10:00:00,Triin,Kannelmäki,Kanneltie 62,car,"Estonian, English, Finnish",0401783981,,Moved here recently for work,,What if my baby is older than the others?,40,1,2026-04-20,,Friend
+A100,,,,,2026-06-01 10:00:00,Sofiia,Hakunila,Hakunilantie 38,"walk, bus","Ukrainian, Swedish",0441791900,,"Struggling with sleep, wants company",Someone within walking distance,Is it free?,30,4,2026-01-16,07.2024,Peer group
+A101,,,,,2026-06-01 10:00:00,Charlotte,Karkkila,Valtatie 9,bicycle,"English, Finnish",041 179 9819,,Long distance to nearest group,,What if my baby is older than the others?,40,1,2026-07-21,,Työväenopisto
+A102,,,,,2026-06-01 10:00:00,Linnea,Korso,Urpiaisentie 56,bus,"Swedish, English",0411807738,,No family in Finland,,Can I join if I move in spring?,25,1,2025-08-10,,Family clinic
+A103,,,,,2026-06-01 10:00:00,Triin,Tuusula,Tuusulantie 12,public transport,Estonian,0441815657,,No family in Finland,Someone in the same situation,,10,1,2025-03-17,,Midwife
+A104,,,,,2026-06-01 10:00:00,Rojin,Raasepori,Rautatienkatu 55,"bus, car, walk","Kurdish, English, Finnish",0451823576,,"New to Finland, doesn't know anyone yet",Just someone to talk to,,25,1,2026-06-06,,Neuvola
+A105,,,,,2026-06-01 10:00:00,Kaisa,Kannelmäki,Vanhaistentie 61,public transport,"Finnish, English",0441831495,,Moved here recently for work,Friends for the baby too,Is it free?,20,1,2026-07-03,,Neuvola
+A106,,,,,2026-06-01 10:00:00,Anastasia,Järvenpää,Helsingintie 31,"car, public transport","Russian, English",0401839414,,Worried about winter with a newborn,Outdoor walks with prams,,Doesn't matter,2,2026-07-12,01.2023,Facebook
+A107,,,,,2026-06-01 10:00:00,Berivan,Hanko,Bulevardi 42,"bus, train","Kurdish, English, Finnish, Swedish",0411847333,,No family in Finland,A group that meets at weekends,Can I join if I move in spring?,15,3,2026-02-13,02.2021,Family clinic
+A108,,,,,2026-06-01 10:00:00,Mai,Kirkkonummi,Asemantie 21,"walk, car",Vietnamese,0441855252,,,Just someone to talk to,,15,1,2026-09-05,,Midwife
+A109,,,,,2026-06-01 10:00:00,Thao,Korso,Urpiaisentie 18,walk,"Vietnamese, English, Finnish",0441863171,,"Struggling with sleep, wants company",Weekly meetups,Are partners welcome sometimes?,15,1,2024-09-14,,Instagram
+A110,,,,,2026-06-01 10:00:00,Wei,Malmi,Latokartanontie 12,"tram, walk","Chinese, English",0411871090,,"New to Finland, doesn't know anyone yet",Just someone to talk to,Is it free?,45,1,2025-01-23,,Friend
+A111,,,,,2026-06-01 10:00:00,Iryna,Lauttasaari,Lauttasaarentie 36,"bus, car, walk","Ukrainian, English, Finnish",0441879009,,"First baby, very little support nearby",Weekly meetups,,40,1,2025-10-10,,Facebook
+A112,,,,,2026-06-01 10:00:00,Ines,Kamppi,Fredrikinkatu 54,walk,"Portuguese, English, Finnish",0451886928,,"New to Finland, doesn't know anyone yet",Practise Finnish with other mums,,10,1,2025-05-05,,Midwife
+A113,,,,,2026-06-01 10:00:00,Lena,Espoon keskus,Kamreerintie 64,walk,"German, English",0451894847,,No family in Finland,Baby swimming buddies,Are partners welcome sometimes?,10,1,2025-02-20,,Peer group
+A114,,,,,2026-06-01 10:00:00,Xia,Hyvinkää,Siltakatu 45,"bicycle, walk","Chinese, English, Finnish",044 190 2766,,No family in Finland,Practise Finnish with other mums,Can I join if I move in spring?,20,1,2025-03-12,,Facebook
+A115,,,,,2026-06-01 10:00:00,Elina,Karkkila,Huhdintie 48,"car, public transport","Finnish, English",0501910685,,,A group that meets at weekends,Are meetings in Finnish or English?,30 minutes,4,2026-06-21,12.2021,Friend
+A116,,,,,2026-06-01 10:00:00,Andreea,Pukinmäki,Eskolantie 38,bus,"Romanian, English",0441918604,,"Struggling with sleep, wants company",Outdoor walks with prams,Is it free?,20,1,2024-04-20,,Midwife
+A117,,,,,2026-06-01 10:00:00,Amina,Matinkylä,Matinkatu 9,"bicycle, walk","Somali, English",0411926523,,Shy about meeting new people,Outdoor walks with prams,,15,1,2025-07-01,,Neuvola
+A118,,,,,2026-06-01 10:00:00,Linh,Espoon keskus,Kamreerintie 42,"car, walk","Vietnamese, English, Finnish",0441934442,,Language barrier at the playground,Friends for the baby too,,30,1,2025-06-10,,Työväenopisto
+A119,,,,,2026-06-01 10:00:00,Amira,Mäntsälä,Keskuskatu 38,"bus, train","Arabic, English, Finnish, Swedish",0441942361,,"Partner works shifts, often alone",,Are meetings in Finnish or English?,30,2,2026-04-24,06.2024,Peer group
+A120,,,,,2026-06-01 10:00:00,Katrin,Kerava,Kultasepänkatu 36,"bus, train","Estonian, English",0441950280,,,Weekly meetups,,20,2,2025-04-15,12.2020,Library
+A121,,,,,2026-06-01 10:00:00,Merve,Sipoo,Iso Kylätie 39,"bicycle, public transport","Turkish, English",0451958199,,"Struggling with sleep, wants company",Outdoor walks with prams,,45 min,3,2026-09-08,01.2025,Family clinic
+A122,,,,,2026-06-01 10:00:00,Yulia,Espoonlahti,Ulappakatu 59,"bus, car, walk","Russian, English, Finnish",0501966118,,,,,15,1,2026-09-19,,Doula
+A123,,,,,2026-06-01 10:00:00,Yulia,Otaniemi,Tekniikantie 16,train,"Russian, English",0501974037,,Worried about winter with a newborn,,What if my baby is older than the others?,45 min,4,2026-07-22,10.2024,Työväenopisto
+A124,,,,,2026-06-01 10:00:00,Pia,Otaniemi,Tekniikantie 57,"bicycle, public transport","Finnish, English",0411981956,,"New to Finland, doesn't know anyone yet",,,60,3,2025-10-25,05.2022,Library
+A125,,,,,2026-06-01 10:00:00,Helmi,Kamppi,Lönnrotinkatu 53,walk,"Finnish, English",050 198 9875,,Long distance to nearest group,Baby swimming buddies,Are meetings in Finnish or English?,15,1,2025-11-08,,Instagram
+A126,,,,,2026-06-01 10:00:00,Liis,Tikkurila,Kielotie 15,"walk, bus, car","Estonian, English, Finnish",0451997794,,Moved here recently for work,Weekly meetups,What if my baby is older than the others?,25,1,2026-09-10,,Doula
+A127,,,,,2026-06-01 10:00:00,Piret,Tapiola,Merituulentie 8,"bicycle, walk","Estonian, English",0452005713,,Worried about winter with a newborn,,What if my baby is older than the others?,15,3,2025-11-28,01.2023,Word of mouth
+A128,,,,,2026-06-01 10:00:00,Rania,Korso,Korsontie 63,"bus, train",Arabic,0502013632,,Feeling isolated on parental leave,,What if my baby is older than the others?,40,1,2025-11-05,,Family clinic
+A129,,,,,2026-06-01 10:00:00,Roosa,Soukka,Yläkartanontie 66,"bicycle, public transport","Finnish, English",+358 40 202 1551,,,,Can I join if I move in spring?,45 min,1,2026-03-21,,Doula
+A130,,,,,2026-06-01 10:00:00,Noora,Leppävaara,Sellonkuja 60,"walk, bus, car","Finnish, English, Swedish",0412029470,,Feeling isolated on parental leave,Just someone to talk to,How often do groups meet?,20,2,2025-09-25,04.2023,Friend
+A131,,,,,2026-06-01 10:00:00,Grace,Pihlajamäki,Liusketie 59,car,English,0502037389,,Language barrier at the playground,,Are meetings in Finnish or English?,35,1,2026-04-18,,Friend
+A132,,,,,2026-06-01 10:00:00,Ruth,Kruununhaka,Liisankatu 63,tram,"English, Finnish",+358402045308,,,A group that meets at weekends,,Doesn't matter,1,2024-07-12,,Family clinic
+A133,,,,,2026-06-01 10:00:00,Siiri,Sipoo,Söderkullantie 53,"tram, walk","Finnish, English",0402053227,,"Struggling with sleep, wants company",Someone in the same situation,How often do groups meet?,15,2,2026-03-25,02.2023,Family clinic
+A134,,,,,2026-06-01 10:00:00,Fatima,Munkkiniemi,Munkkiniemen puistotie 51,car,"Arabic, English, Finnish",0412061146,,Worried about winter with a newborn,Just someone to talk to,Is it free?,20,2,2024-08-11,11.2022,Instagram
+A135,,,,,2026-06-01 10:00:00,Nour,Vihti,Nummelantie 63,train,"Arabic, English, Finnish",0442069065,,,Evening meetups after partner is home,,30,1,2024-10-07,,Peer group
+A136,,,,,2026-06-01 10:00:00,Léa,Malmi,Malminkaari 64,public transport,"French, English",0502076984,,Language barrier at the playground,Outdoor walks with prams,How often do groups meet?,60,1,2025-10-16,,Neuvola
+A137,,,,,2026-06-01 10:00:00,Vlora,Pihlajamäki,Moreenitie 11,tram,"Albanian, English, Finnish",0442084903,,Moved here recently for work,,,20,1,2026-05-02,,Neuvola
+A138,,,,,2026-06-01 10:00:00,Kanya,Kirkkonummi,Asemantie 24,tram,"Thai, English",0412092822,,,Friends for the baby too,How often do groups meet?,10,2,2025-01-27,09.2022,Doula
+A139,,,,,2026-06-01 10:00:00,Carmen,Lauttasaari,Gyldenintie 62,"bicycle, public transport","Spanish, English, Finnish",0412100741,,Worried about winter with a newborn,Outdoor walks with prams,Can I join if I move in spring?,30 minutes,1,2026-09-13,,Instagram
+A140,,,,,2026-06-01 10:00:00,Jasmine,Itäkeskus,Turunlinnantie 20,walk,"Tagalog, English",0502108660,,Shy about meeting new people,Weekly meetups,Is it free?,Doesn't matter,1,2026-07-07,,Doula
+A141,,,,,2026-06-01 10:00:00,Andreea,Malmi,Kirkonkyläntie 34,"walk, bus","Romanian, English, Finnish",0452116579,,"Struggling with sleep, wants company",,,45,1,2025-02-02,,Word of mouth
+A142,,,,,2026-06-01 10:00:00,Oona,Loviisa,Kuningattarenkatu 54,"train, walk","Finnish, English",0402124498,,,,,60,1,2026-05-23,,Word of mouth
+A143,,,,,2026-06-01 10:00:00,Xia,Soukka,Soukanahde 13,bicycle,"Chinese, Finnish",0452132417,,"New to Finland, doesn't know anyone yet",Someone within walking distance,,30,4,2026-07-16,09.2023,Peer group
+A144,,,,,2026-06-01 10:00:00,Amira,Oulunkylä,Mäkitorpantie 28,public transport,"Arabic, Finnish",+358 50 214 0336,,"Struggling with sleep, wants company",Coffee walks,Can toddlers join too?,about 20 min,2,2025-08-08,05.2023,Instagram
+A145,,,,,2026-06-01 10:00:00,Outi,Kallio,Fleminginkatu 9,skateboard,Finnish,0401234516,,,,,15,1,2025-11-04,,Neuvola
 ,,,,,2026-06-01 10:00:00,Tuula,Töölö,Museokatu 2,car,Finnish,123,,,,,many,1,32.13.2025,,Neuvola
-A018,,,,,2026-06-01 10:00:00,Riikka,,,"bus, walk",,0401234518,,,,,12,1,,,Friend
+A147,,,,,2026-06-01 10:00:00,Riikka,,,"bus, walk",,0401234518,,,,,12,1,,,Friend
+A148,,,,,2026-06-01 10:00:00,Weronika,Tikkurila,Kielotie 14,"hoverboard, bus","Polish, English",0451234148,,,,,200,2,2025-03-12,09.2021,Facebook
+A149,,,,,2026-06-01 10:00:00,,Leppävaara,Sellonkuja 4,car,"Estonian, Finnish",+358 45 999 0149,,,,,25,1,2019-02-01,,Neuvola
+A150,,,,,2026-06-01 10:00:00,Beatrice,Porvoo,Jokikatu 11,,"Italian, English",,,,,,,1,2026-01-20,,Library

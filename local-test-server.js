@@ -111,13 +111,59 @@ function cellGet(row, hi, col) {
 // Fake geo/travel responses (deterministic, not random — same input → same
 // output across runs so test results are stable)
 // ---------------------------------------------------------------------------
+// Districts and municipalities across Uusimaa, matching the Neighbourhood
+// column in mock-applicants.csv.
 const NEIGHBORHOOD_COORDS = {
-  "Kallio": [60.1841, 24.9502],
-  "Töölö": [60.1756, 24.9145],
-  "Espoo keskus": [60.2052, 24.6522],
-  "Kamppi": [60.1687, 24.9316],
-  "Kruununhaka": [60.1710, 24.9580],
-  "Punavuori": [60.1620, 24.9350],
+  "Kallio"        : [60.1841, 24.9502],
+  "Töölö"         : [60.1756, 24.9145],
+  "Kamppi"        : [60.1687, 24.9316],
+  "Kruununhaka"   : [60.1710, 24.9580],
+  "Punavuori"     : [60.1620, 24.9350],
+  "Pasila"        : [60.1990, 24.9330],
+  "Herttoniemi"   : [60.1950, 25.0300],
+  "Vuosaari"      : [60.2070, 25.1440],
+  "Malmi"         : [60.2510, 25.0100],
+  "Munkkiniemi"   : [60.1970, 24.8750],
+  "Lauttasaari"   : [60.1590, 24.8790],
+  "Oulunkylä"     : [60.2270, 24.9680],
+  "Itäkeskus"     : [60.2100, 25.0800],
+  "Kannelmäki"    : [60.2400, 24.8770],
+  "Pihlajamäki"   : [60.2380, 24.9950],
+  "Pukinmäki"     : [60.2440, 24.9930],
+  "Espoon keskus" : [60.2052, 24.6522],
+  "Tapiola"       : [60.1758, 24.8043],
+  "Leppävaara"    : [60.2190, 24.8130],
+  "Matinkylä"     : [60.1600, 24.7380],
+  "Espoonlahti"   : [60.1490, 24.6560],
+  "Otaniemi"      : [60.1841, 24.8301],
+  "Soukka"        : [60.1420, 24.6890],
+  "Kauklahti"     : [60.1880, 24.6100],
+  "Kauniainen"    : [60.2110, 24.7280],
+  "Tikkurila"     : [60.2920, 25.0400],
+  "Myyrmäki"      : [60.2610, 24.8540],
+  "Korso"         : [60.3520, 25.0640],
+  "Aviapolis"     : [60.3120, 24.9640],
+  "Hakunila"      : [60.2740, 25.0940],
+  "Martinlaakso"  : [60.2760, 24.8460],
+  "Kirkkonummi"   : [60.1230, 24.4400],
+  "Kerava"        : [60.4030, 25.1030],
+  "Järvenpää"     : [60.4730, 25.0890],
+  "Tuusula"       : [60.4030, 25.0290],
+  "Nurmijärvi"    : [60.4640, 24.8080],
+  "Hyvinkää"      : [60.6310, 24.8600],
+  "Porvoo"        : [60.3930, 25.6650],
+  "Lohja"         : [60.2500, 24.0650],
+  "Vihti"         : [60.4170, 24.3200],
+  "Sipoo"         : [60.3760, 25.2680],
+  "Mäntsälä"      : [60.6330, 25.3170],
+  "Karkkila"      : [60.5340, 24.2100],
+  "Raasepori"     : [59.9760, 23.4360],
+  "Hanko"         : [59.8230, 22.9680],
+  "Inkoo"         : [60.0450, 24.0060],
+  "Siuntio"       : [60.1450, 24.2280],
+  "Pornainen"     : [60.4750, 25.3750],
+  "Askola"        : [60.5300, 25.6000],
+  "Loviisa"       : [60.4570, 26.2250],
 };
 
 function stableHash(str) {
@@ -128,7 +174,12 @@ function stableHash(str) {
 
 function fakeGeocode(addresses) {
   return addresses.map((addr) => {
-    const neighborhood = Object.keys(NEIGHBORHOOD_COORDS).find((n) => addr.includes(n));
+    // Addresses arrive as "<street>, <neighbourhood>, Finland". Match the
+    // neighbourhood part exactly rather than scanning the whole string for a
+    // substring — "Malminkatu, Kamppi" contains "Malmi", which is a different
+    // district some 8km away.
+    const parts = addr.split(",").map((p) => p.trim());
+    const neighborhood = parts.find((p) => NEIGHBORHOOD_COORDS[p]);
     const base = NEIGHBORHOOD_COORDS[neighborhood] || [60.1699, 24.9384];
     const h = stableHash(addr);
     return { address: addr, lat: base[0] + (((h % 1000) / 1000) - 0.5) * 0.01,

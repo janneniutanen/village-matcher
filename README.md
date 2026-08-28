@@ -1,6 +1,7 @@
 # Village Matcher
 
-A support-group matching tool for new mothers in Helsinki. Reads applicants
+A support-group matching tool for new mothers in the Helsinki region. Reads
+applicants
 from a Google Sheet, runs a neighbourhood-aware grouping algorithm, and lets
 a coordinator review and approve candidate groups. Approved members are
 written back to the sheet, and the Active Groups tab shows everyone grouped
@@ -73,7 +74,7 @@ netlify/
 netlify.toml                 Netlify build config
 server.js                    local production server (serves frontend + API)
 local-test-server.js         local dev server (CSV mock data only)
-mock-applicants.csv          18 sample rows for offline testing
+mock-applicants.csv          150 sample rows for offline testing
 package.json
 tests/
 docs/
@@ -119,6 +120,32 @@ For the DOM smoke tests, start the local CSV server first:
 node local-test-server.js mock-applicants.csv
 ```
 Then open `index.html?backend=http://localhost:8791` or run `npm run test:ui`.
+
+## Test data
+
+`mock-applicants.csv` holds 150 synthetic applicants spread across 50 real
+districts and municipalities in Uusimaa — Helsinki, Espoo, Vantaa and
+Kauniainen through to Porvoo, Lohja, Hyvinkää, Raasepori and Hanko — using
+real street names with invented house numbers. It is shaped to exercise the
+matching engine rather than to look tidy:
+
+- **Languages** follow the largest foreign-language populations in Finland
+  (Russian, Estonian, Arabic, Somali, Ukrainian, Vietnamese, Chinese, Kurdish,
+  Persian and others), most combined with English and/or Finnish.
+- **Baby ages** span roughly two and a half years across 28 distinct months,
+  so the `maxAgeGap` setting actually bites.
+- **Phone numbers** mix bare local, spaced, `+358` and foreign formats to
+  exercise normalization.
+- **Travel limits** include free-text answers such as "Doesn't matter" and
+  "about 20 min".
+- **Six rows are deliberately corrupted** (A145–A150) — unknown transport
+  modes, an impossible date, a missing name, an out-of-range travel time — so
+  the validation layer always has something to flag. The remaining 144 are
+  eligible for matching.
+
+`NEIGHBORHOOD_COORDS` in `local-test-server.js` carries a coordinate for every
+neighbourhood the CSV uses, so the offline geocode stub places people in
+roughly the right part of the map.
 
 ## Sheet columns
 

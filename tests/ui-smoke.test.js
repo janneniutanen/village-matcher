@@ -117,8 +117,8 @@ test("UI smoke: init() loads real applicants from the backend into state", async
   const window = buildWindow();
   await window.__test__.init();
   assert.equal(window.__test__.state.usingBackendData, true);
-  assert.equal(window.__test__.state.applicants.length, 18);
-  assert.equal(window.__test__.state.applicants.filter((a) => a.hasDataIssues).length, 3);
+  assert.equal(window.__test__.state.applicants.length, 150);
+  assert.equal(window.__test__.state.applicants.filter((a) => a.hasDataIssues).length, 6);
 });
 
 test("UI smoke: data issues render into the DOM with readable reasons", async () => {
@@ -189,7 +189,8 @@ test("UI smoke: active groups render applicants grouped by village", async () =>
   const unmatchedList = window.document.getElementById("unmatchedList");
   assert.match(activeGroups.textContent, /Kallio Village · 2 moms/);
   assert.match(activeGroups.textContent, new RegExp(window.__test__.state.applicants[0].id));
-  assert.doesNotMatch(activeGroups.textContent, new RegExp(`${window.__test__.state.applicants[2].id}.*Sara`, "s"));
+  const excluded = window.__test__.state.applicants[2];
+  assert.doesNotMatch(activeGroups.textContent, new RegExp(`${excluded.id}.*${excluded.name}`, "s"));
   assert.doesNotMatch(unmatchedList.textContent, new RegExp(window.__test__.state.applicants[0].id));
   assert.match(unmatchedList.textContent, new RegExp(window.__test__.state.applicants[2].id));
 
@@ -334,11 +335,14 @@ test("UI smoke: advancing status through the full pipeline reaches the backend e
 test("UI smoke: WhatsApp link is built with a normalized phone number and filled template", async () => {
   const window = buildWindow();
   await window.__test__.init();
-  const lisa = window.__test__.state.applicants.find((a) => a.name === "Lisa");
+  const person = window.__test__.state.applicants.find((a) => a.eligibleForMatching);
   window.__test__.state.templates.firstContact = "Hi {{name}} from {{neighborhood}}!";
-  const link = window.__test__.waLink(lisa, window.__test__.state.templates.firstContact, null);
-  assert.match(link, /^https:\/\/wa\.me\/358401234501\?text=/);
-  assert.match(decodeURIComponent(link), /Hi Lisa from Kallio!/);
+  const link = window.__test__.waLink(person, window.__test__.state.templates.firstContact, null);
+  // The sheet holds numbers in assorted local formats; the link must carry the
+  // normalized international number with no '+' or separators.
+  assert.match(link, new RegExp(`^https://wa\\.me/${person.phone.replace(/\D/g, "")}\\?text=`));
+  assert.match(link, /^https:\/\/wa\.me\/358\d+\?text=/);
+  assert.match(decodeURIComponent(link), new RegExp(`Hi ${person.name} from ${person.neighborhood}!`));
 });
 
 test("UI smoke: settings changes round-trip to the backend", async () => {

@@ -66,11 +66,11 @@ test("unknown action: returns ok:false with a message, doesn't crash the server"
 test("getApplicants: loads the CSV, matches expected count and validation split", async () => {
   const { ok, result } = await call("getApplicants");
   assert.equal(ok, true);
-  assert.equal(result.length, 18);
+  assert.equal(result.length, 150);
   const flagged = result.filter((a) => a.hasDataIssues);
   const eligible = result.filter((a) => a.eligibleForMatching);
-  assert.equal(flagged.length, 3);
-  assert.equal(eligible.length, 15);
+  assert.equal(flagged.length, 6);
+  assert.equal(eligible.length, 144);
 });
 
 test("getApplicants: corrupted rows carry human-readable reasons", async () => {
@@ -79,17 +79,29 @@ test("getApplicants: corrupted rows carry human-readable reasons", async () => {
   assert.ok(outi.dataIssues.some((e) => e.includes("skateboard")));
   const riikka = result.find((a) => a.name === "Riikka");
   assert.ok(riikka.dataIssues.some((e) => e.toLowerCase().includes("neighborhood")));
+  // A row with several problems reports all of them, not just the first.
+  assert.ok(riikka.dataIssues.length >= 3, riikka.dataIssues.join(" | "));
 });
 
 test("getApplicants: valid rows have coordinate-independent fields parsed correctly", async () => {
   const { result } = await call("getApplicants");
-  const lisa = result.find((a) => a.name === "Lisa");
-  // Transport words from the sheet are normalized to the single-letter codes
-  // the matching engine and routing profiles are keyed by.
-  assert.deepEqual(lisa.transport.sort(), ["D", "P", "W"]);
-  assert.deepEqual(lisa.language, ["Russian", "English"]);
-  assert.equal(lisa.phone, "+358401234501");
-  assert.equal(lisa.maxTravel, 15);
+  const eligible = result.filter((a) => a.eligibleForMatching);
+
+  eligible.forEach((a) => {
+    // Transport words from the sheet are normalized to the single-letter
+    // codes the matching engine and routing profiles are keyed by.
+    a.transport.forEach((m) => assert.match(m, /^[WDPB]$/, `${a.id} has raw mode '${m}'`));
+    assert.ok(a.transport.length > 0);
+    assert.ok(a.language.length > 0);
+    assert.match(a.phone, /^\+\d{7,15}$/, `${a.id} phone not normalized: ${a.phone}`);
+    assert.ok(a.maxTravel > 0 && a.maxTravel <= 180);
+    assert.ok(a.dob instanceof Date || !isNaN(new Date(a.dob).getTime()));
+  });
+
+  // The fixture deliberately mixes local, spaced and international formats.
+  const phones = eligible.map((a) => a.phone);
+  assert.ok(phones.some((p) => p.startsWith("+358")), "expected Finnish numbers");
+  assert.ok(phones.some((p) => !p.startsWith("+358")), "expected at least one foreign number");
 });
 
 test("full flow: approve a group, advance every stage, verify persisted state throughout", async () => {
