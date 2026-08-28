@@ -395,8 +395,10 @@ async function drawOverlap(candidateId) {
   const members = cand.memberIds.map(getApplicant);
   const color   = candidateColor(candidateId);
 
-  const commonModes = members.reduce((acc, m) => acc.filter((mode) => m.transport.includes(mode)), ['car', 'walk']);
-  const mode        = commonModes.includes('car') ? 'car' : commonModes.includes('walk') ? 'walk' : null;
+  // Isochrones need a mode every member shares. Prefer driving over walking
+  // because it yields the larger, more useful overlap area.
+  const commonModes = members.reduce((acc, m) => acc.filter((mode) => m.transport.includes(mode)), ['D', 'W']);
+  const mode        = commonModes.includes('D') ? 'D' : commonModes.includes('W') ? 'W' : null;
 
   if (mode && members.length <= 5) {
     try {
@@ -418,7 +420,7 @@ async function drawOverlap(candidateId) {
 }
 
 const FLAG_MAP = { English: '🇬🇧', Finnish: '🇫🇮', Swedish: '🇸🇪', Russian: '🇷🇺', Arabic: '🇸🇦', French: '🇫🇷', Swahili: '🇰🇪' };
-const MODE_ICON = { bus: '🚌', car: '🚙', walk: '🚶' };
+const MODE_ICON = { W: '🚶', D: '🚙', P: '🚌', B: '🚲' };
 
 function codedLine(a) {
   const flags = a.language.map((l) => FLAG_MAP[l] || escHtml(l)).join('');

@@ -393,12 +393,17 @@ async function geocodeBatch(addresses) {
 }
 
 // ---------------------------------------------------------------------------
-// Travel time — OSRM (car/walk) + Digitransit Routing API (transit)
+// Travel time — OSRM (walk/bike/drive) + Digitransit Routing API (transit)
+//
+// Modes are the single-letter codes produced by Validation.parseTransport:
+// W walk, D drive, P public transport, B bicycle.
 // ---------------------------------------------------------------------------
+const OSRM_PROFILE = { W: 'foot', B: 'bike', D: 'car' };
+
 async function travelTimeBatch(pairs) {
   return Promise.all(pairs.map(async (p) => {
     try {
-      const minutes = p.mode === 'bus' ? await transitMinutes(p.from, p.to) : await osrmMinutes(p.from, p.to, p.mode);
+      const minutes = p.mode === 'P' ? await transitMinutes(p.from, p.to) : await osrmMinutes(p.from, p.to, p.mode);
       return { id: p.id, minutes };
     } catch (err) {
       return { id: p.id, error: err.message };
@@ -407,7 +412,7 @@ async function travelTimeBatch(pairs) {
 }
 
 async function osrmMinutes(from, to, mode) {
-  const profile = mode === 'walk' ? 'foot' : 'car';
+  const profile = OSRM_PROFILE[mode] || 'car';
   const url     = `https://router.project-osrm.org/route/v1/${profile}/${from.lon},${from.lat};${to.lon},${to.lat}?overview=false`;
   const resp    = await fetch(url);
   const data    = await resp.json();
@@ -446,10 +451,12 @@ async function transitMinutes(from, to) {
 // ---------------------------------------------------------------------------
 // Isochrones — OpenRouteService v2
 // ---------------------------------------------------------------------------
+const ORS_PROFILE = { W: 'foot-walking', B: 'cycling-regular', D: 'driving-car' };
+
 async function isochroneReq(locations, mode, minutes) {
   const key     = process.env.ORS_API_KEY;
   if (!key) throw new Error('ORS_API_KEY environment variable is not set');
-  const profile = mode === 'walk' ? 'foot-walking' : 'driving-car';
+  const profile = ORS_PROFILE[mode] || 'driving-car';
 
   const resp = await fetch(`https://api.openrouteservice.org/v2/isochrones/${profile}`, {
     method: 'POST',
