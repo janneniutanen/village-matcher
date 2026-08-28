@@ -1,9 +1,10 @@
 # Village Matcher
 
 A support-group matching tool for new mothers in Helsinki. Reads applicants
-from a Google Sheet, runs a neighbourhood-aware grouping algorithm, lets a
-coordinator review and approve groups, and tracks each group through outreach
-stages.
+from a Google Sheet, runs a neighbourhood-aware grouping algorithm, and lets
+a coordinator review and approve candidate groups. Approved members are
+written back to the sheet, and the Active Groups tab shows everyone grouped
+by the `Village` column the coordinator maintains there.
 
 ## Architecture
 
@@ -120,8 +121,28 @@ node local-test-server.js mock-applicants.csv
 ```
 Then open `index.html?backend=http://localhost:8791` or run `npm run test:ui`.
 
+## Sheet columns
+
+Applicant data is read by column heading, not position, so columns can be
+reordered freely. The tool reads `Identity number`, `Name`, `Neighbourhood`,
+`Street address`, `Transport`, `Language`, `travel time`, `Date of birth`,
+`Phone number`, `Older child`, `amount of children`, `worries`, `hopes`,
+`questions`, `source`, `My notes`, `Mum's status`, `Village` and
+`Village status`. It writes back to `Match Status` and `Match Group ID`,
+creating those two columns on first run if they are missing.
+
+`Village` is coordinator-maintained: anyone with a value there is treated as
+already placed, so they drop out of the unmatched pool and appear under that
+village in Active Groups.
+
 ## Known simplifications
 
-- Greedy clustering heuristic, not an optimal solver
+- Greedy clustering heuristic, not an optimal solver. Candidate groups are
+  formed first-fit in date-of-birth order and listed in the order they were
+  formed — there is no ranking by match quality.
 - Neighbourhood matching is exact-string (sheet typos create separate groups)
+- Per-member outreach stage tracking was removed along with the village
+  rewrite. `Match Status` is still written on approval, but the UI no longer
+  advances it through contacted/confirmed/introduced, and only the first
+  WhatsApp template in Settings has a consumer.
 - No multi-user support — designed for a single organizer
