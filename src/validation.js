@@ -113,6 +113,7 @@ function parseMaxTravel(raw) {
   if (typeof raw === "string" && raw.includes("Doesn't matter")) return 180;
   const n = typeof raw === "number" ? raw : parseFloat(String(raw).replaceAll(/[^\d]/g, ''));
   if (!isFinite(n) || n <= 0 || n > 180) return null;
+  if (typeof raw === "string" && raw.toLowerCase().includes("hour")) return n * 60;
   return n;
 }
 

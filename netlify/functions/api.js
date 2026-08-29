@@ -469,7 +469,7 @@ async function isochroneReq(locations, mode, minutes) {
 // Action dispatch
 // ---------------------------------------------------------------------------
 async function dispatch(body) {
-  console.log(body);
+  console.log(JSON.stringify(body));
   switch (body.action) {
     case 'ping':
       await ensureReady();
