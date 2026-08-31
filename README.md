@@ -143,9 +143,32 @@ matching engine rather than to look tidy:
   the validation layer always has something to flag. The remaining 144 are
   eligible for matching.
 
-`NEIGHBORHOOD_COORDS` in `local-test-server.js` carries a coordinate for every
-neighbourhood the CSV uses, so the offline geocode stub places people in
-roughly the right part of the map.
+`src/regions.js` carries a coordinate for every neighbourhood the CSV uses, so
+the offline geocode stub places people in roughly the right part of the map.
+
+## Messy addresses
+
+The sheet is hand-filled, so the address cells are cleaned before being sent to
+the geocoder. The original is never overwritten — the organizer still sees what
+she typed, and only the query is normalized.
+
+Dropped from the street cell, because they identify a person rather than a
+building and make the geocoder miss: apartment and stair markers (`as 3`,
+`as. 12`, `rappu B`, `krs 3`, `huoneisto`, `bostad`), care-of lines, a postal
+code and city written after a comma, and the tail of a house-number range. A
+house-number suffix letter is kept (`5 A`) while an apartment number after it
+is not (`5 A 12`). A missing space is inserted, so `Vaasankatu5` resolves.
+
+The Neighbourhood cell is matched case-insensitively, with or without
+Scandinavian diacritics (`toolo` finds Töölö), ignoring postal codes and
+parentheses, and accepting a district and city written together — `Helsinki,
+Kallio` anchors on Kallio, since a district anchors more tightly than a city.
+A city on its own (`Helsinki`, `Espoo`, `Vantaa`) resolves too, with a wider
+radius. Anything unrecognised is flagged rather than guessed at.
+
+Measured against the live API on 19 deliberately messy inputs: 7 resolved
+before, 18 after, with the nineteenth correctly flagged as a street that
+doesn't exist.
 
 ## Sheet columns
 

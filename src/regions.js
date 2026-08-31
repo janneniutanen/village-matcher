@@ -81,9 +81,106 @@ const REGION_BOUNDS = { minLat: 59.78, maxLat: 60.72, minLon: 22.85, maxLon: 26.
 // where the measured spread between centre and a real address was 8.9km.
 const DISTRICT_RADIUS_KM = 12;
 
-function districtCentre(neighborhood) {
+// Municipality-level anchors, for when the Neighbourhood column holds a city
+// rather than a district — "Helsinki" instead of "Kallio". Coarser than a
+// district, so they get a wider radius.
+const MUNICIPALITY_COORDS = {
+  "Helsinki": [60.1699, 24.9384],
+  "Espoo":    [60.2055, 24.6559],
+  "Vantaa":   [60.2934, 25.0378],
+};
+const MUNICIPALITY_RADIUS_KM = 22;
+
+// Lookup index that tolerates how the column is actually filled in: any case,
+// stray punctuation, a postal code, or a district and city written together.
+const INDEX = new Map();
+function indexKey(value) {
+  return String(value)
+    .toLowerCase()
+    .replace(/[()]/g, " ")
+    .replace(/\b\d{5}\b/g, " ")   // postal code
+    .replace(/[.,;]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+// Scandinavian letters are routinely typed without their diacritics, so
+// "toolo" has to find Töölö. Both spellings are indexed.
+function foldedKey(value) {
+  return indexKey(value).replace(/[äå]/g, "a").replace(/ö/g, "o");
+}
+function addToIndex(name, coords, radiusKm) {
+  const entry = { name, coords, radiusKm };
+  for (const key of [indexKey(name), foldedKey(name)]) {
+    if (key && !INDEX.has(key)) INDEX.set(key, entry);
+  }
+}
+Object.entries(DISTRICT_COORDS).forEach(([name, coords]) => addToIndex(name, coords, DISTRICT_RADIUS_KM));
+Object.entries(MUNICIPALITY_COORDS).forEach(([name, coords]) => addToIndex(name, coords, MUNICIPALITY_RADIUS_KM));
+// A couple of spellings that come up but aren't the official form.
+[["espoo keskus", "Espoon keskus"], ["helsingfors", "Helsinki"], ["esbo", "Espoo"], ["vanda", "Vantaa"]]
+  .forEach(([alias, target]) => {
+    const hit = INDEX.get(indexKey(target));
+    if (hit) INDEX.set(alias, hit);
+  });
+
+// Resolves the Neighbourhood cell to something to anchor the geocoder on.
+// Tries the whole value first, then each comma- or slash-separated part, so
+// "Helsinki, Kallio" anchors on Kallio (the more specific of the two) rather
+// than the city centre.
+function resolveDistrict(neighborhood) {
   if (!neighborhood) return null;
-  return DISTRICT_COORDS[String(neighborhood).trim()] || null;
+  const lookup = (value) => INDEX.get(indexKey(value)) || INDEX.get(foldedKey(value));
+
+  const whole = lookup(neighborhood);
+  if (whole) return whole;
+
+  // "Helsinki, Kallio" and "Kallio (Helsinki)" both name two places; take each
+  // in turn and prefer the district, since it anchors more tightly.
+  const parts = String(neighborhood).split(/[,/|()]/).map((p) => p.trim()).filter(Boolean);
+  const hits = parts.map(lookup).filter(Boolean);
+  return hits.find((h) => h.radiusKm === DISTRICT_RADIUS_KM) || hits[0] || null;
+}
+
+function districtCentre(neighborhood) {
+  const hit = resolveDistrict(neighborhood);
+  return hit ? hit.coords : null;
+}
+
+// Apartment, stair and care-of markers. Everything from here on is about who
+// lives there, not where the building is, and including it makes the geocoder
+// miss — "Vaasankatu 5 as 3" finds nothing while "Vaasankatu 5" is exact.
+const APARTMENT_MARKER = /\b(as|asunto|asuinto|bst|bostad|lgh|rappu|rp|huoneisto|huon|kerros|krs)\b\.?/i;
+const CARE_OF_MARKER = /\bc\s*[/\\]\s*o\b|\bc\.o\.|\bco\b/i;
+
+// Reduces a messy cell to just the street and house number the geocoder can
+// use. The original is never overwritten — the organizer still sees what she
+// typed; only the query is cleaned.
+function normalizeStreet(raw) {
+  let s = String(raw || "").trim();
+  if (!s) return "";
+
+  // A postal code and city, or an apartment written after a comma, both land
+  // in later segments. The street is always first.
+  s = s.split(",")[0];
+  s = s.replace(/[\u2010-\u2015]/g, "-").replace(/\s+/g, " ").trim();
+
+  for (const marker of [CARE_OF_MARKER, APARTMENT_MARKER]) {
+    const m = s.match(marker);
+    if (m) s = s.slice(0, m.index).trim();
+  }
+
+  // "Vaasankatu5" -> "Vaasankatu 5"
+  s = s.replace(/([a-zäöåA-ZÄÖÅ])(\d)/g, "$1 $2");
+
+  // Keep the street name, the house number, and a single suffix letter.
+  // Anything after that is a range end or an apartment number.
+  const m = s.match(/^(.*?)\s+(\d+)\s*([a-zäöå])?(?![a-zäöå0-9])/i);
+  if (m) {
+    const [, name, number, letter] = m;
+    const kept = letter ? `${name} ${number} ${letter.toUpperCase()}` : `${name} ${number}`;
+    return kept.replace(/\s+/g, " ").trim();
+  }
+  return s.replace(/[.\s]+$/, "");
 }
 
 function distanceKm([lat1, lon1], [lat2, lon2]) {
@@ -117,9 +214,17 @@ function streetName(value) {
 // isn't enough; the street has to be the one that was asked for. Differing
 // house numbers are fine, since the geocoder returns the nearest known number.
 function streetNameMatches(requested, resolvedLabel) {
-  const want = streetName(requested);
+  const want = streetName(normalizeStreet(requested));
   const got  = streetName(String(resolvedLabel || "").split(",")[0]);
-  return want !== "" && got !== "" && want === got;
+  if (want === "" || got === "") return false;
+  if (want === got) return true;
+
+  // "Vaasank. 5" is a normal way to write Vaasankatu, and the geocoder expands
+  // it correctly, so an abbreviated request may match the full name by prefix.
+  // Requiring five characters keeps this from accepting unrelated streets:
+  // "Elonkuja" is still not a prefix of "Sellonkuja".
+  const [shorter, longer] = want.length <= got.length ? [want, got] : [got, want];
+  return shorter.length >= 5 && longer.startsWith(shorter);
 }
 
 const Regions = {
@@ -128,6 +233,10 @@ const Regions = {
   REGION_BOUNDS,
   DISTRICT_RADIUS_KM,
   districtCentre,
+  resolveDistrict,
+  normalizeStreet,
+  MUNICIPALITY_COORDS,
+  MUNICIPALITY_RADIUS_KM,
   distanceKm,
   withinDistrict,
   streetName,

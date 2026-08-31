@@ -386,13 +386,20 @@ async function geocodeBatch(entries) {
   if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
 
   return Promise.all(entries.map(async (entry) => {
-    const street       = typeof entry === 'string' ? entry : (entry.street || '');
+    const rawStreet    = typeof entry === 'string' ? entry : (entry.street || '');
     const neighborhood = typeof entry === 'string' ? ''    : (entry.neighborhood || '');
-    const centre       = Regions.districtCentre(neighborhood);
-    const base         = { street, neighborhood };
+
+    // The sheet is hand-filled, so the cell may carry an apartment number, a
+    // stair, a postal code or a care-of line. None of that helps the geocoder
+    // and some of it makes it miss entirely, so the query uses a cleaned
+    // street while the response reports the original.
+    const street  = Regions.normalizeStreet(rawStreet) || rawStreet;
+    const anchor  = Regions.resolveDistrict(neighborhood);
+    const centre  = anchor ? anchor.coords : null;
+    const base    = { street: rawStreet, neighborhood, queried: street };
 
     const params = new URLSearchParams({
-      text:               [street, neighborhood, 'Finland'].filter(Boolean).join(', '),
+      text:               [street, anchor ? anchor.name : neighborhood, 'Finland'].filter(Boolean).join(', '),
       size:               '5',
       layers:             'address',
       'boundary.country': 'FIN',
@@ -402,7 +409,7 @@ async function geocodeBatch(entries) {
       params.set('focus.point.lon', String(centre[1]));
       params.set('boundary.circle.lat', String(centre[0]));
       params.set('boundary.circle.lon', String(centre[1]));
-      params.set('boundary.circle.radius', String(Regions.DISTRICT_RADIUS_KM));
+      params.set('boundary.circle.radius', String(anchor.radiusKm));
     } else {
       const b = Regions.REGION_BOUNDS;
       params.set('focus.point.lat', String(Regions.REGION_CENTRE[0]));
@@ -432,7 +439,7 @@ async function geocodeBatch(entries) {
       // the best available check is that the returned municipality matches
       // what the organizer typed.
       const inArea = centre
-        ? Regions.withinDistrict(centre, [lat, lon])
+        ? Regions.distanceKm(centre, [lat, lon]) <= anchor.radiusKm
         : !!(town && neighborhood && town.trim().toLowerCase() === neighborhood.trim().toLowerCase());
       const sameStreet = Regions.streetNameMatches(street, label);
       const precise    = inArea && sameStreet;
@@ -444,7 +451,7 @@ async function geocodeBatch(entries) {
         error: precise ? undefined
           : !inArea
             ? `matched "${label || 'unknown'}"${town ? ` in ${town}` : ''}, which does not look like ${neighborhood || 'the given area'}`
-            : `no such street here — closest match was "${label || 'unknown'}"`,
+            : `no such street here — closest match was "${label || 'unknown'}"${street !== rawStreet ? ` (searched for "${street}")` : ''}`,
       };
     } catch (err) {
       return { ...base, precise: false, error: err.message };

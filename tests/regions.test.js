@@ -62,3 +62,83 @@ test("streetNameMatches: a fuzzy match to a different street is rejected", () =>
   assert.equal(Regions.streetNameMatches("", "Elonkuja 4, Helsinki"), false);
   assert.equal(Regions.streetNameMatches("Sellonkuja 4", ""), false);
 });
+
+test("normalizeStreet: apartment, stair and care-of details are dropped", () => {
+  // These make the geocoder miss entirely: "Vaasankatu 5 as 3" finds nothing
+  // while "Vaasankatu 5" is exact.
+  assert.equal(Regions.normalizeStreet("Vaasankatu 5 as 3"), "Vaasankatu 5");
+  assert.equal(Regions.normalizeStreet("Vaasankatu 5, as. 12"), "Vaasankatu 5");
+  assert.equal(Regions.normalizeStreet("Vaasankatu 5 rappu B"), "Vaasankatu 5");
+  assert.equal(Regions.normalizeStreet("Museokatu 15 krs 3"), "Museokatu 15");
+  assert.equal(Regions.normalizeStreet("Vaasankatu 5 c/o Virtanen"), "Vaasankatu 5");
+});
+
+test("normalizeStreet: a house-number suffix letter is kept, an apartment number is not", () => {
+  assert.equal(Regions.normalizeStreet("Vaasankatu 5 A 12"), "Vaasankatu 5 A");
+  assert.equal(Regions.normalizeStreet("Munkkiniemen puistotie 12 A 4"), "Munkkiniemen puistotie 12 A");
+});
+
+test("normalizeStreet: postal code and city after a comma are dropped", () => {
+  assert.equal(Regions.normalizeStreet("Vaasankatu 5, 00500 Helsinki"), "Vaasankatu 5");
+});
+
+test("normalizeStreet: spacing, punctuation and ranges are tidied", () => {
+  assert.equal(Regions.normalizeStreet("Vaasankatu5"), "Vaasankatu 5", "missing space is inserted");
+  assert.equal(Regions.normalizeStreet("Vaasankatu  5"), "Vaasankatu 5");
+  assert.equal(Regions.normalizeStreet("Vaasankatu 5."), "Vaasankatu 5");
+  assert.equal(Regions.normalizeStreet("Vaasankatu 5-7"), "Vaasankatu 5", "a range keeps its first number");
+});
+
+test("normalizeStreet: multi-word street names survive intact", () => {
+  assert.equal(Regions.normalizeStreet("Iso Roobertinkatu 9"), "Iso Roobertinkatu 9");
+  assert.equal(Regions.normalizeStreet("Munkkiniemen puistotie 12"), "Munkkiniemen puistotie 12");
+  // "Askolantie" must not be mistaken for an "as" apartment marker.
+  assert.equal(Regions.normalizeStreet("Askolantie 5"), "Askolantie 5");
+});
+
+test("normalizeStreet: blank and unparseable input never throws", () => {
+  assert.equal(Regions.normalizeStreet(""), "");
+  assert.equal(Regions.normalizeStreet(null), "");
+  assert.equal(Regions.normalizeStreet("no number here"), "no number here");
+});
+
+test("resolveDistrict: tolerates case, diacritics, postal codes and combined names", () => {
+  assert.equal(Regions.resolveDistrict("kallio").name, "Kallio");
+  assert.equal(Regions.resolveDistrict("KALLIO").name, "Kallio");
+  assert.equal(Regions.resolveDistrict("toolo").name, "Töölö", "typed without diacritics");
+  assert.equal(Regions.resolveDistrict("Nurmijarvi").name, "Nurmijärvi");
+  assert.equal(Regions.resolveDistrict("00500 Helsinki").name, "Helsinki");
+  assert.equal(Regions.resolveDistrict("Helsingfors").name, "Helsinki");
+  assert.equal(Regions.resolveDistrict("espoon keskus").name, "Espoon keskus");
+});
+
+test("resolveDistrict: prefers the district when a district and city are both given", () => {
+  // Anchoring on Kallio is tighter than anchoring on Helsinki.
+  assert.equal(Regions.resolveDistrict("Helsinki, Kallio").name, "Kallio");
+  assert.equal(Regions.resolveDistrict("Kallio (Helsinki)").name, "Kallio");
+  assert.equal(Regions.resolveDistrict("Kallio, Helsinki").radiusKm, Regions.DISTRICT_RADIUS_KM);
+});
+
+test("resolveDistrict: a city alone resolves, with a wider radius than a district", () => {
+  const city = Regions.resolveDistrict("Helsinki");
+  assert.equal(city.name, "Helsinki");
+  assert.ok(city.radiusKm > Regions.DISTRICT_RADIUS_KM);
+});
+
+test("resolveDistrict: an unknown place stays unresolved rather than guessing", () => {
+  assert.equal(Regions.resolveDistrict("Atlantis"), null);
+  assert.equal(Regions.resolveDistrict(""), null);
+  assert.equal(Regions.resolveDistrict(null), null);
+});
+
+test("streetNameMatches: an abbreviated street matches the expanded name", () => {
+  assert.equal(Regions.streetNameMatches("Vaasank. 5", "Vaasankatu 5 F, Helsinki"), true);
+  // Prefix leniency must not accept an unrelated street.
+  assert.equal(Regions.streetNameMatches("Sellonkuja 4", "Elonkuja 4, Helsinki"), false);
+});
+
+test("streetNameMatches: messy input is sanitised before comparison", () => {
+  assert.equal(Regions.streetNameMatches("Vaasankatu 5 as 3", "Vaasankatu 5, Helsinki"), true);
+  assert.equal(Regions.streetNameMatches("Vaasankatu5", "Vaasankatu 5 F, Helsinki"), true);
+  assert.equal(Regions.streetNameMatches("Vaasankatu 5, 00500 Helsinki", "Vaasankatu 5, Helsinki"), true);
+});

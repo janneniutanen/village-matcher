@@ -125,22 +125,26 @@ function stableHash(str) {
 // imprecise rather than quietly placed somewhere plausible.
 function fakeGeocode(entries) {
   return entries.map((entry) => {
-    const street       = typeof entry === "string" ? entry.split(",")[0].trim() : (entry.street || "");
+    const rawStreet    = typeof entry === "string" ? entry.split(",")[0].trim() : (entry.street || "");
     const neighborhood = typeof entry === "string"
-      ? (entry.split(",").map((p) => p.trim()).find((p) => NEIGHBORHOOD_COORDS[p]) || "")
+      ? (entry.split(",").map((p) => p.trim()).find((p) => Regions.resolveDistrict(p)) || "")
       : (entry.neighborhood || "");
-    const base = NEIGHBORHOOD_COORDS[String(neighborhood).trim()];
-    if (!base) {
-      return { street, neighborhood, precise: false, error: "district not recognised" };
+    // Same sanitising and same tolerant district lookup as the real geocoder,
+    // so messy input behaves the same offline as it does in production.
+    const street = Regions.normalizeStreet(rawStreet) || rawStreet;
+    const anchor = Regions.resolveDistrict(neighborhood);
+    if (!anchor) {
+      return { street: rawStreet, neighborhood, queried: street, precise: false, error: "district not recognised" };
     }
-    const h = stableHash(street + "|" + neighborhood);
+    const h = stableHash(street + "|" + anchor.name);
     return {
-      street,
+      street: rawStreet,
       neighborhood,
-      lat: base[0] + (((h % 1000) / 1000) - 0.5) * 0.01,
-      lon: base[1] + ((((h >> 10) % 1000) / 1000) - 0.5) * 0.02,
-      label: `${street}, ${neighborhood}`,
-      town: neighborhood,
+      queried: street,
+      lat: anchor.coords[0] + (((h % 1000) / 1000) - 0.5) * 0.01,
+      lon: anchor.coords[1] + ((((h >> 10) % 1000) / 1000) - 0.5) * 0.02,
+      label: `${street}, ${anchor.name}`,
+      town: anchor.name,
       confidence: 0.95,
       precise: true,
       _fake: true,
