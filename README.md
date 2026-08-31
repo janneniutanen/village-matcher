@@ -219,7 +219,8 @@ mode's fixed overhead (walking to the stop, waiting for the bus) is not halved
 Public transport times come from Digitransit's scheduled router
 (`planConnection`), asked for at a fixed weekday mid-morning so results don't
 depend on when matching is run, and including the wait for the first departure.
-Walking, cycling and driving go via OSRM. If a routing call fails, the engine
+Walking, cycling and driving come from the same router, asked for one mode at
+a time. If a routing call fails, the engine
 falls back to a straight-line speed estimate from `MODE_MODEL` — the New
 Matches tab states how many journeys were routed and how many were estimated,
 because a dead routing API otherwise looks identical to a healthy one.

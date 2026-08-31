@@ -460,12 +460,14 @@ async function geocodeBatch(entries) {
 }
 
 // ---------------------------------------------------------------------------
-// Travel time — OSRM (walk/bike/drive) + Digitransit Routing API (transit)
+// Travel time — Digitransit Routing API for every mode.
 //
 // Modes are the single-letter codes produced by Validation.parseTransport:
 // W walk, D drive, P public transport, B bicycle.
 // ---------------------------------------------------------------------------
-const OSRM_PROFILE = { W: 'foot', B: 'bike', D: 'car' };
+// Digitransit's own mode names. Everything routes through Digitransit now,
+// including walking and cycling — see directMinutes for why.
+const DIRECT_MODE = { W: 'WALK', B: 'BICYCLE', D: 'CAR' };
 
 async function travelTimeBatch(pairs) {
   const departure = representativeDeparture();
@@ -473,7 +475,7 @@ async function travelTimeBatch(pairs) {
     try {
       const minutes = p.mode === 'P'
         ? await transitMinutes(p.from, p.to, departure)
-        : await osrmMinutes(p.from, p.to, p.mode);
+        : await directMinutes(p.from, p.to, p.mode, departure);
       return { id: p.id, minutes };
     } catch (err) {
       return { id: p.id, error: err.message };
@@ -481,13 +483,45 @@ async function travelTimeBatch(pairs) {
   }));
 }
 
-async function osrmMinutes(from, to, mode) {
-  const profile = OSRM_PROFILE[mode] || 'car';
-  const url     = `https://router.project-osrm.org/route/v1/${profile}/${from.lon},${from.lat};${to.lon},${to.lat}?overview=false`;
-  const resp    = await fetch(url);
-  const data    = await resp.json();
-  if (!data.routes || !data.routes.length) throw new Error('No OSRM route found');
-  return data.routes[0].duration / 60;
+// Walking, cycling and driving, all from Digitransit rather than OSRM.
+//
+// The public OSRM demo server this used to call returns byte-identical results
+// for its foot, bike and car profiles — it routes everything as a car. A 2.9km
+// walk came back as 6.7 minutes (26 km/h) instead of roughly 40, so walkers
+// were being matched as though they drove. Digitransit answers the same trip
+// as WALK 42.1 min (4.0 km/h), BICYCLE 13.3 and CAR 6.0, which is the whole
+// point of asking per mode. It is also the API the transit path already uses,
+// so this drops a second provider and a dependency on a demo server that isn't
+// meant for production traffic.
+async function directMinutes(from, to, mode, departure = representativeDeparture()) {
+  const key = process.env.DIGITRANSIT_API_KEY;
+  if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
+
+  const directMode = DIRECT_MODE[mode];
+  if (!directMode) throw new Error(`Unknown transport mode '${mode}'`);
+
+  const query = `{ planConnection(
+    origin:      { location: { coordinate: { latitude: ${from.lat}, longitude: ${from.lon} } } },
+    destination: { location: { coordinate: { latitude: ${to.lat}, longitude: ${to.lon} } } },
+    dateTime:    { earliestDeparture: "${departure}" },
+    modes:       { directOnly: true, direct: [${directMode}] },
+    first: 1
+  ) { edges { node { duration } } } }`;
+
+  const resp = await fetch('https://api.digitransit.fi/routing/v2/finland/gtfs/v1', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'digitransit-subscription-key': key },
+    body: JSON.stringify({ query }),
+  });
+  if (!resp.ok) throw new Error(`Digitransit routing returned HTTP ${resp.status}`);
+
+  const data = await resp.json();
+  if (data.errors?.length) throw new Error(`Digitransit routing: ${data.errors[0].message}`);
+
+  const node = data.data?.planConnection?.edges?.[0]?.node;
+  if (!node) throw new Error(`No ${directMode.toLowerCase()} route found`);
+  // Direct modes leave immediately, so there is no boarding wait to add.
+  return node.duration / 60;
 }
 
 // Transit times must be reproducible, so they're asked for at a fixed
