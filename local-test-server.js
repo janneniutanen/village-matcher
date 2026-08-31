@@ -153,20 +153,16 @@ function initCsvStore() {
 
   store = {
     applicants: csvRows.slice(1).map((row, i) => {
-      const raw = {
-        id: get(row, "Identity number"), name: get(row, "Name"),
-        neighborhood: get(row, "Neighbourhood"), street: get(row, "Street address"),
-        transport: get(row, "Transport"), language: get(row, "Language"),
-        maxTravel: get(row, "travel time"), dob: get(row, "Date of birth"),
-        phone: get(row, "Phone number"),
-      };
+      const raw = Object.fromEntries(
+        Object.entries(COL).map(([prop, header]) => [prop, get(row, header)])
+      );
       const a = Validation.normalizeApplicant(raw);
       a.sheetRow = i + 2;
       a.matchStatus = "unmatched"; a.matchGroupId = null;
-      a.worries = get(row, "worries"); a.hopes = get(row, "hopes");
-      a.questions = get(row, "questions"); a.source = get(row, "source");
-      a.amountOfChildren = get(row, "amount of children");
-      a.olderSiblingBirthMonth = get(row, "birth month");
+      a.worries = get(row, COL.worries); a.hopes = get(row, COL.hopes);
+      a.questions = get(row, COL.questions); a.source = get(row, COL.source);
+      a.amountOfChildren = get(row, COL.amountOfChildren);
+      a.olderSiblingBirthMonth = get(row, COL.olderSiblingBirthMonth);
       return a;
     }),
     groups: [],
@@ -199,8 +195,10 @@ const COL = {
   id: "Identity number", name: "Name", neighborhood: "Neighbourhood",
   street: "Street address", transport: "Transport", language: "Language",
   maxTravel: "travel time", dob: "Date of birth", phone: "Phone number",
+  village: "Village", villageStatus: "Village status",
+  status: "Mum's status", myNotes: "My notes",
   matchStatus: "Match Status", matchGroupId: "Match Group ID",
-  olderSiblingBirthMonth: "birth month",
+  olderSiblingBirthMonth: "Older child",
   worries: "worries", hopes: "hopes", questions: "questions",
   source: "source", amountOfChildren: "amount of children",
 };
@@ -312,20 +310,16 @@ async function sheetGetApplicants() {
   const hi = headerIndex(rows);
   const get = (row, col) => cellGet(row, hi, col);
   return rows.slice(1).map((row, i) => {
-    const raw = {
-      id: get(row, COL.id), name: get(row, COL.name),
-      neighborhood: get(row, COL.neighborhood), street: get(row, COL.street),
-      transport: get(row, COL.transport), language: get(row, COL.language),
-      maxTravel: get(row, COL.maxTravel), dob: get(row, COL.dob),
-      phone: get(row, COL.phone),
-    };
+    const raw = Object.fromEntries(
+      Object.entries(COL).map(([prop, header]) => [prop, get(row, header)])
+    );
     const a = Validation.normalizeApplicant(raw);
     a.sheetRow = i + 2;
     a.matchStatus = get(row, COL.matchStatus) || "unmatched";
     a.matchGroupId = get(row, COL.matchGroupId) || null;
-    a.worries = get(row, "worries"); a.hopes = get(row, "hopes");
-    a.questions = get(row, "questions"); a.source = get(row, "source");
-    a.amountOfChildren = get(row, "amount of children");
+    a.worries = get(row, COL.worries); a.hopes = get(row, COL.hopes);
+    a.questions = get(row, COL.questions); a.source = get(row, COL.source);
+    a.amountOfChildren = get(row, COL.amountOfChildren);
     a.olderSiblingBirthMonth = get(row, COL.olderSiblingBirthMonth);
     return a;
   });

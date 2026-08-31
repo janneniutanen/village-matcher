@@ -226,12 +226,6 @@ async function computeCandidateGroups() {
   }));
 }
 
-function findReplacementCandidates(group) {
-  const members = group.memberIds.map((id) => getApplicant(id));
-  const pool    = state.applicants.filter((a) => a.matchStatus === 'unmatched' && a.eligibleForMatching);
-  return MatchingEngine.findReplacementCandidates(members, pool, state.settings, getTravelMinutes);
-}
-
 // ---------------------------------------------------------------------------
 // Data mutations
 // ---------------------------------------------------------------------------
@@ -284,18 +278,6 @@ function markStatus(applicantId, status) {
   renderAll();
 }
 
-function assignReplacement(groupId, applicantId) {
-  const group = state.groups.find((g) => g.id === groupId);
-  if (!group) return;
-  group.memberIds.push(applicantId);
-  const a = getApplicant(applicantId);
-  a.matchStatus  = 'match_found';
-  a.matchGroupId = groupId;
-  syncToBackend('updateApplicant', { id: applicantId, fields: { matchStatus: 'match_found', matchGroupId: groupId } });
-  syncToBackend('updateGroup', { id: groupId, fields: { memberIds: group.memberIds } });
-  renderAll();
-}
-
 // ---------------------------------------------------------------------------
 // WhatsApp helpers
 // ---------------------------------------------------------------------------
@@ -315,12 +297,6 @@ function waLink(applicant, template, group) {
   const digits = applicant.phone.replace(/[^\d]/g, '');
   const text   = encodeURIComponent(fillTemplate(template, applicant, group));
   return `https://wa.me/${digits}?text=${text}`;
-}
-
-function stageTemplateFor(status) {
-  if (status === 'unmatched' || status === 'match_found') return state.templates.firstContact;
-  if (status === 'contacted') return state.templates.confirmationAsk;
-  return state.templates.introduction;
 }
 
 // ---------------------------------------------------------------------------
@@ -395,8 +371,10 @@ async function drawOverlap(candidateId) {
   const members = cand.memberIds.map(getApplicant);
   const color   = candidateColor(candidateId);
 
-  const commonModes = members.reduce((acc, m) => acc.filter((mode) => m.transport.includes(mode)), ['car', 'walk']);
-  const mode        = commonModes.includes('car') ? 'car' : commonModes.includes('walk') ? 'walk' : null;
+  // Isochrones need a mode every member shares. Prefer driving over walking
+  // because it yields the larger, more useful overlap area.
+  const commonModes = members.reduce((acc, m) => acc.filter((mode) => m.transport.includes(mode)), ['D', 'W']);
+  const mode        = commonModes.includes('D') ? 'D' : commonModes.includes('W') ? 'W' : null;
 
   if (mode && members.length <= 5) {
     try {
@@ -418,13 +396,7 @@ async function drawOverlap(candidateId) {
 }
 
 const FLAG_MAP = { English: '🇬🇧', Finnish: '🇫🇮', Swedish: '🇸🇪', Russian: '🇷🇺', Arabic: '🇸🇦', French: '🇫🇷', Swahili: '🇰🇪' };
-const MODE_ICON = { bus: '🚌', car: '🚙', walk: '🚶' };
-
-function codedLine(a) {
-  const flags = a.language.map((l) => FLAG_MAP[l] || escHtml(l)).join('');
-  const modes = a.transport.map((m) => MODE_ICON[m] || escHtml(m)).join('');
-  return `<strong>${escHtml(a.id)}</strong> ${escHtml(a.name)} ${flags} ${MatchingEngine.formatMonthYear(a.dob)} ${modes}${a.maxTravel}`;
-}
+const MODE_ICON = { W: '🚶', D: '🚙', P: '🚌', B: '🚲' };
 
 function renderCandidateCards() {
   const container = document.getElementById('candidateCards');
@@ -484,9 +456,20 @@ function hasVillage(a) {
 }
 
 function applicantCard(a, mapColor) {
-  const detailRow = (label, value, unsafeValue) => value || unsafeValue || value === 0
-    ? `<div><strong>${label}</strong><span>${value ? escHtml(value) : ''}${unsafeValue ? unsafeValue : ''}</span></div>`
+  const detailRow = (label, value) => value || value === 0
+    ? `<div><strong>${label}</strong><span>${escHtml(value)}</span></div>`
     : '';
+  // wa.me takes digits only, no '+'. A row that failed phone validation is
+  // still shown, but as plain text rather than a link that can't work.
+  const phoneRow = () => {
+    if (!a.phone) return '';
+    const digits = a.phone.replace(/[^\d]/g, '');
+    const shown  = escHtml(a.phone);
+    const body   = digits
+      ? `<a href="https://wa.me/${digits}" rel="noopener noreferrer" target="_blank">${shown}</a>`
+      : shown;
+    return `<div><strong>Phone</strong><span>${body}</span></div>`;
+  };
   const mapDot = mapColor
     ? `<span class="participant-map-dot" style="background:${escHtml(mapColor)}; border-color:${escHtml(mapColor)}" aria-label="Map dot color"></span>`
     : '';
@@ -500,7 +483,7 @@ function applicantCard(a, mapColor) {
       </div>
       <div class="applicant-details" hidden>
         ${detailRow('Name', a.name)}
-        ${detailRow('Phone', undefined, `<a href="https://wa.me/${a.phone.slice(1)}">${a.phone}</a>`)}
+        ${phoneRow()}
         ${detailRow('Baby DOB', MatchingEngine.formatMonthYear(a.dob))}
         ${detailRow('Languages', a.language.join(', '))}
         ${detailRow('Transport', `${a.transport.join('')} ${a.maxTravel}`)}
@@ -526,12 +509,6 @@ function attachApplicantDetailToggles(container) {
       btn.setAttribute('aria-expanded', String(!isOpen));
     });
   });
-}
-
-function statusStepper(current) {
-  const stages = ['unmatched', 'match_found', 'contacted', 'confirmed', 'introduced'];
-  const idx    = stages.indexOf(current);
-  return `<div class="stepper">${stages.map((s, i) => `<span class="step ${i <= idx ? 'step-done' : ''} ${i === idx ? 'step-current' : ''}">${s}</span>`).join('')}</div>`;
 }
 
 function renderActiveGroups() {
@@ -575,36 +552,6 @@ function renderActiveGroups() {
   });
 
   attachApplicantDetailToggles(container);
-
-  container.querySelectorAll('button[data-action]').forEach((btn) => {
-    btn.addEventListener('click', () => {
-      const id = btn.dataset.id;
-      if (btn.dataset.action === 'advance') {
-        const stages = ['unmatched', 'match_found', 'contacted', 'confirmed', 'introduced'];
-        const a      = getApplicant(id);
-        const idx    = stages.indexOf(a.matchStatus);
-        if (idx === -1 || idx === stages.length - 1) return;
-        markStatus(id, stages[idx + 1]);
-      }
-      if (btn.dataset.action === 'decline') markStatus(id, 'declined');
-      if (btn.dataset.action === 'copy') {
-        const group   = state.groups.find((g) => g.id === id);
-        const numbers = group.memberIds.map((mid) => getApplicant(mid).phone).join(', ');
-        navigator.clipboard?.writeText(numbers).catch(() => {});
-        btn.textContent = 'Copied!';
-        setTimeout(() => (btn.textContent = 'Copy phone numbers'), 1500);
-      }
-      if (btn.dataset.action === 'suggest') {
-        const group       = state.groups.find((g) => g.id === id);
-        const suggestions = findReplacementCandidates(group);
-        const box         = document.getElementById(`suggestions-${id}`);
-        box.innerHTML = suggestions.length
-          ? suggestions.map((s) => `<div class="mini-card"><span>${codedLine(s)}</span><button data-action="assign" data-group="${escHtml(id)}" data-id="${escHtml(s.id)}">Add to group</button></div>`).join('')
-          : `<div class="empty-state">No one in the unmatched pool currently fits this group.</div>`;
-        box.querySelectorAll('button').forEach((b) => b.addEventListener('click', () => assignReplacement(b.dataset.group, b.dataset.id)));
-      }
-    });
-  });
 
   reviewContainer.querySelectorAll('button').forEach((btn) => {
     btn.addEventListener('click', () => markStatus(btn.dataset.id, 'unmatched'));
@@ -785,7 +732,6 @@ function wireControls() {
     renderAll();
     btn.disabled = false;
     btn.textContent = '↻ Sync with Google Sheet';
-    console.log("Synced");
     if (!success) alert('Sync failed — check your connection and try again.');
   });
 
