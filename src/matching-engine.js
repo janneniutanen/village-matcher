@@ -75,12 +75,28 @@ function groupAgeRangeLabel(members) {
   return earliest === latest ? earliest : `${earliest}\u2013${latest}`;
 }
 
-// Directional: each person must be able to reach the other using one of
-// their own transport modes, within their own max travel time. A shared
+// A group meets at a café or a park, not at each other's flats, so neither
+// person travels the full door-to-door distance — each covers roughly half of
+// it. Requiring the whole journey from both sides was halving the practical
+// radius and rejecting pairs that can comfortably meet: a mother willing to
+// walk 30 minutes and one willing to take a bus for 15 could only be paired
+// within 2km, when meeting midway puts them 4km apart.
+//
+// Fixed costs don't halve. You still walk to the stop and wait for the bus
+// whether you ride two stops or ten, so only the moving part is divided.
+function meetingLegMinutes(fullMinutes, mode) {
+  if (!isFinite(fullMinutes)) return fullMinutes;
+  const model    = MODE_MODEL[mode];
+  const overhead = model ? Math.min(model.overheadMin, fullMinutes) : 0;
+  return overhead + (fullMinutes - overhead) / 2;
+}
+
+// Directional: each person must be able to reach the meeting point using one
+// of their own transport modes, within their own max travel time. A shared
 // mode is not required.
 function pairwiseTravelOk(a, b, settings, travelTimeFn) {
-  const aCanTravel = a.transport.some((mode) => travelTimeFn(a, b, mode) <= a.maxTravel);
-  const bCanTravel = b.transport.some((mode) => travelTimeFn(b, a, mode) <= b.maxTravel);
+  const aCanTravel = a.transport.some((mode) => meetingLegMinutes(travelTimeFn(a, b, mode), mode) <= a.maxTravel);
+  const bCanTravel = b.transport.some((mode) => meetingLegMinutes(travelTimeFn(b, a, mode), mode) <= b.maxTravel);
   return aCanTravel && bCanTravel;
 }
 
@@ -113,7 +129,9 @@ function travelScore(members, travelTimeFn) {
     for (const b of members) {
       if (a.id === b.id) continue;
       if (!a.transport.length || !a.maxTravel) return 0;
-      const best = Math.min(...a.transport.map((mode) => travelTimeFn(a, b, mode)));
+      // Same journey pairwiseTravelOk checks, so the score and the constraint
+      // can't disagree about how far someone is actually travelling.
+      const best = Math.min(...a.transport.map((mode) => meetingLegMinutes(travelTimeFn(a, b, mode), mode)));
       worstRatio = Math.max(worstRatio, best / a.maxTravel);
     }
   }
@@ -227,6 +245,7 @@ const MatchingEngine = {
   formatMonthYear,
   groupAgeRangeLabel,
   pairwiseTravelOk,
+  meetingLegMinutes,
   SCORE_WEIGHTS,
   travelScore,
   ageScore,

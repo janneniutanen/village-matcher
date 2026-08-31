@@ -209,9 +209,53 @@ test("travelScore: measures each leg against that member's own limit", () => {
 
 test("travelScore: scored on the worst pair, not the average", () => {
   const members = [mom({ id: "A" }), mom({ id: "B" }), mom({ id: "C" })];
-  // A-B and A-C are instant, but B-C is at the limit.
-  const travel  = makeGradedTravelTime({ "A-B": 0, "A-C": 0, "B-C": 15 });
+  // A-B and A-C are instant, but B-C is a 30-minute door-to-door journey,
+  // so each of them travels 15 minutes to meet — exactly their limit.
+  const travel  = makeGradedTravelTime({ "A-B": 0, "A-C": 0, "B-C": 30 });
   assert.equal(Engine.travelScore(members, travel), 0);
+});
+
+test("meetingLegMinutes: halves the journey, since both sides travel to meet", () => {
+  // 'walk' isn't a mode code, so there's no fixed overhead to preserve.
+  assert.equal(Engine.meetingLegMinutes(30, "walk"), 15);
+  assert.equal(Engine.meetingLegMinutes(0, "walk"), 0);
+  assert.equal(Engine.meetingLegMinutes(Infinity, "walk"), Infinity);
+});
+
+test("meetingLegMinutes: fixed overhead is not halved", () => {
+  // Public transport carries a 6-minute overhead: you walk to the stop and
+  // wait for the bus whether you ride two stops or ten.
+  assert.equal(Engine.meetingLegMinutes(30, "P"), 6 + 12);
+  assert.equal(Engine.meetingLegMinutes(6, "P"), 6, "a journey no longer than the overhead can't shrink");
+  assert.equal(Engine.meetingLegMinutes(4, "P"), 4, "nor can a shorter one");
+  // Walking has no overhead, so it halves cleanly.
+  assert.equal(Engine.meetingLegMinutes(30, "W"), 15);
+});
+
+// Door-to-door minutes that depend on the mode, the way real routing does:
+// the same trip takes a walker much longer than a bus rider.
+function makeModalTravelTime(minutesByMode) {
+  return (a, b, mode) => (mode in minutesByMode ? minutesByMode[mode] : 60);
+}
+
+test("pairwiseTravelOk: different modes pair when each can reach the midpoint", () => {
+  // Lisa's case: one mother walks up to 30 minutes, the other takes public
+  // transport for up to 15. About 4km apart — a 53-minute walk or a 21-minute
+  // bus ride door-to-door, so 27 minutes walking and 14 minutes riding to meet
+  // halfway. Both inside their own limits, despite sharing no transport mode.
+  const walker = mom({ id: "W1", transport: ["W"], maxTravel: 30 });
+  const rider  = mom({ id: "P1", transport: ["P"], maxTravel: 15 });
+  const travel = makeModalTravelTime({ W: 53, P: 21 });
+  assert.equal(Engine.pairwiseTravelOk(walker, rider, {}, travel), true);
+  // The old door-to-door rule rejected this: a 53-minute walk exceeded 30.
+});
+
+test("pairwiseTravelOk: still rejects a pair when one side can't reach halfway", () => {
+  const walker = mom({ id: "W1", transport: ["W"], maxTravel: 30 });
+  const rider  = mom({ id: "P1", transport: ["P"], maxTravel: 15 });
+  // ~6km: an 80-minute walk is still 40 minutes to the midpoint.
+  const travel = makeModalTravelTime({ W: 80, P: 28 });
+  assert.equal(Engine.pairwiseTravelOk(walker, rider, {}, travel), false);
 });
 
 test("ageScore: a tighter age spread scores higher than one at the limit", () => {

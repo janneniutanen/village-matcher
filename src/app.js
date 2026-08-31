@@ -244,14 +244,18 @@ async function computeCandidateGroups() {
     for (let j = i + 1; j < pool.length; j++) {
       const a = pool[i], b = pool[j];
       const distanceKm = MatchingEngine.haversineKm(a.coords, b.coords);
-      const modesA = a.transport.filter((mode) => {
+      // Rough reachability, only to decide which pairs are worth a routing
+      // call. Each person covers about half the door-to-door distance to reach
+      // the meeting point, minus the fixed overhead of their mode, and the 1.5
+      // factor allows for roads not running straight.
+      const reachable = (person, mode) => {
         const model = MatchingEngine.MODE_MODEL[mode];
-        return model && distanceKm <= (a.maxTravel / 60) * model.speedKmh * 1.5;
-      });
-      const modesB = b.transport.filter((mode) => {
-        const model = MatchingEngine.MODE_MODEL[mode];
-        return model && distanceKm <= (b.maxTravel / 60) * model.speedKmh * 1.5;
-      });
+        if (!model) return false;
+        const movingMin = Math.max(0, person.maxTravel - model.overheadMin);
+        return distanceKm <= 2 * (movingMin / 60) * model.speedKmh * 1.5;
+      };
+      const modesA = a.transport.filter((mode) => reachable(a, mode));
+      const modesB = b.transport.filter((mode) => reachable(b, mode));
       if (modesA.length === 0 || modesB.length === 0) continue;
       modesA.forEach((mode) => pairsNeeded.push({ a, b, mode }));
       modesB.forEach((mode) => pairsNeeded.push({ a: b, b: a, mode }));
