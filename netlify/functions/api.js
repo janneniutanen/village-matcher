@@ -480,19 +480,58 @@ async function osrmMinutes(from, to, mode) {
   return data.routes[0].duration / 60;
 }
 
+// Transit times must be reproducible, so they're asked for at a fixed
+// representative moment rather than "now" — otherwise the answer depends on
+// what time of day the organizer happens to run matching. A weekday mid-
+// morning is when these groups actually meet.
+//
+// Cached for the life of the function instance so every pair in a run is
+// compared against the same moment.
+let _departureIso = null;
+
+function representativeDeparture() {
+  if (_departureIso) return _departureIso;
+
+  const parts = (date) =>
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Helsinki',
+      year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
+    }).formatToParts(date).reduce((acc, p) => ({ ...acc, [p.type]: p.value }), {});
+
+  // Next Monday-to-Friday, starting from tomorrow so it's always in the future.
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 1);
+  for (let i = 0; i < 7 && ['Sat', 'Sun'].includes(parts(d).weekday); i++) {
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  const { year, month, day } = parts(d);
+
+  // Helsinki is +03:00 in summer and +02:00 in winter, so the offset has to be
+  // read for that specific date rather than hardcoded.
+  const offset = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Helsinki', timeZoneName: 'longOffset',
+  }).formatToParts(d).find((p) => p.type === 'timeZoneName').value.replace('GMT', '') || '+00:00';
+
+  _departureIso = `${year}-${month}-${day}T10:00:00${offset}`;
+  return _departureIso;
+}
+
 async function transitMinutes(from, to) {
   const key = process.env.DIGITRANSIT_API_KEY;
   if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
 
-  // NOTE: Digitransit GraphQL routing — tested against v2 Finland router.
-  // If this returns errors, check the Digitransit GraphiQL explorer at
-  // https://api.digitransit.fi/graphiql/finland/v2 for schema changes.
-  const query = `{ plan(
-    from: { lat: ${from.lat}, lon: ${from.lon} },
-    to: { lat: ${to.lat}, lon: ${to.lon} },
-    numItineraries: 1,
-    transportModes: [{ mode: WALK }, { mode: BUS }, { mode: RAIL }, { mode: TRAM }, { mode: SUBWAY }]
-  ) { itineraries { duration } } }`;
+  const departure = representativeDeparture();
+
+  // planConnection is the scheduled OTP2 API — it consults timetables, unlike
+  // the older `plan` field which returned the same duration at 03:00 as at
+  // 10:00. Verified against the live router: requesting 03:00 pushes `start`
+  // to when first service actually runs.
+  const query = `{ planConnection(
+    origin:      { location: { coordinate: { latitude: ${from.lat}, longitude: ${from.lon} } } },
+    destination: { location: { coordinate: { latitude: ${to.lat}, longitude: ${to.lon} } } },
+    dateTime:    { earliestDeparture: "${departure}" },
+    first: 1
+  ) { edges { node { duration start } } } }`;
 
   const resp = await fetch('https://api.digitransit.fi/routing/v2/finland/gtfs/v1', {
     method: 'POST',
@@ -502,10 +541,22 @@ async function transitMinutes(from, to) {
     },
     body: JSON.stringify({ query }),
   });
-  const data         = await resp.json();
-  const itineraries  = data.data?.plan?.itineraries;
-  if (!itineraries?.length) throw new Error('No transit itinerary found');
-  return itineraries[0].duration / 60;
+  if (!resp.ok) throw new Error(`Digitransit routing returned HTTP ${resp.status}`);
+
+  const data = await resp.json();
+  // GraphQL reports schema and validation problems in `errors` with HTTP 200.
+  // These went unchecked before, so a renamed field surfaced as the misleading
+  // "No transit itinerary found".
+  if (data.errors?.length) throw new Error(`Digitransit routing: ${data.errors[0].message}`);
+
+  const node = data.data?.planConnection?.edges?.[0]?.node;
+  if (!node) throw new Error('No transit itinerary found');
+
+  // `duration` covers start-to-end only. Waiting for the first departure is
+  // the difference between when we asked to leave and when the itinerary
+  // begins, and it's part of the journey as far as the traveller is concerned.
+  const waitMs = Math.max(0, new Date(node.start).getTime() - new Date(departure).getTime());
+  return node.duration / 60 + waitMs / 60000;
 }
 
 // ---------------------------------------------------------------------------

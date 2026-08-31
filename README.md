@@ -185,6 +185,25 @@ Scoring only ranks groups that already pass the hard constraints in
 `fitsGroup` (shared language, age gap, travel time within each member's
 limit) — it never lets an ineligible group through.
 
+## Travel times
+
+Groups meet at a café or park rather than at each other's homes, so the check
+is whether each person can reach a meeting point within their own stated limit
+using their own transport, not whether either could travel the whole way. A
+mode's fixed overhead (walking to the stop, waiting for the bus) is not halved
+— only the moving time is.
+
+Public transport times come from Digitransit's scheduled router
+(`planConnection`), asked for at a fixed weekday mid-morning so results don't
+depend on when matching is run, and including the wait for the first departure.
+Walking, cycling and driving go via OSRM. If a routing call fails, the engine
+falls back to a straight-line speed estimate from `MODE_MODEL` — the New
+Matches tab states how many journeys were routed and how many were estimated,
+because a dead routing API otherwise looks identical to a healthy one.
+
+Seeds are taken most-constrained-first: whoever can reach the fewest others
+forms a group before someone better connected takes their only option.
+
 ## Known simplifications
 
 - Greedy best-fit clustering heuristic, not an optimal solver. Seeds are

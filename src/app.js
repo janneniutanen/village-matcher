@@ -136,6 +136,8 @@ const state = {
   overlapVisibleFor: null,
   nextGroupNum:      1,
   usingBackendData:  false,
+  travelTimeStats: null,
+  travelTimeError: null,
 };
 
 // ---------------------------------------------------------------------------
@@ -218,9 +220,11 @@ async function ensureTravelTimes(pairsNeeded) {
     const results = await callBackend('travelTime', { pairs: toFetch });
     results.forEach((r) => {
       if (typeof r.minutes === 'number') cacheSet(r.id, { minutes: r.minutes });
+      else if (r.error && !state.travelTimeError) state.travelTimeError = r.error;
     });
   } catch (err) {
     console.warn('Travel-time backend call failed, falling back to estimates:', err.message);
+    state.travelTimeError = err.message;
   }
 }
 
@@ -261,7 +265,15 @@ async function computeCandidateGroups() {
       modesB.forEach((mode) => pairsNeeded.push({ a: b, b: a, mode }));
     }
   }
+  state.travelTimeError = null;
   await ensureTravelTimes(pairsNeeded);
+
+  // Lisa asked whether the tool really checks public transport times. It does,
+  // but any routing failure degrades silently to a straight-line speed
+  // estimate, which is indistinguishable in the output — so count which is
+  // which and say so.
+  const routed = pairsNeeded.filter(({ a, b, mode }) => cacheGet(travelCacheKey(a.id, b.id, mode))).length;
+  state.travelTimeStats = { total: pairsNeeded.length, routed, estimated: pairsNeeded.length - routed };
 
   // clusterGroups already returns strongest-first; the score is recomputed
   // here for display rather than widening its return type.
@@ -484,11 +496,24 @@ function scorePanel(score) {
     </div>`;
 }
 
+// Says plainly where the travel times came from. Without this a run against a
+// dead routing API looks exactly like a healthy one.
+function travelSourceNote() {
+  const s = state.travelTimeStats;
+  if (!s || !s.total) return '';
+  if (s.estimated === 0) {
+    return `<div class="source-note source-note-ok">Travel times: all ${s.routed} journeys routed via HSL/Digitransit.</div>`;
+  }
+  const pct = Math.round((s.estimated / s.total) * 100);
+  const why = state.travelTimeError ? ` Last error: ${escHtml(state.travelTimeError)}` : '';
+  return `<div class="source-note source-note-warn">Travel times: ${s.routed} of ${s.total} journeys routed via HSL/Digitransit; ${s.estimated} (${pct}%) fell back to straight-line estimates, which are less accurate.${why}</div>`;
+}
+
 function renderCandidateCards() {
   const container = document.getElementById('candidateCards');
-  container.innerHTML = '';
+  container.innerHTML = travelSourceNote();
   if (state.candidateGroups.length === 0) {
-    container.innerHTML = `<div class="empty-state">No candidate groups yet. Adjust the filters above and click "Run matching."</div>`;
+    container.innerHTML += `<div class="empty-state">No candidate groups yet. Adjust the filters above and click "Run matching."</div>`;
     return;
   }
   state.candidateGroups.forEach((candidateGroup, rank) => {

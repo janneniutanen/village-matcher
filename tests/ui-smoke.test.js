@@ -259,6 +259,42 @@ test("UI smoke: candidate cards show rank, total score and the breakdown", async
   });
 });
 
+test("UI smoke: candidate view states where travel times came from", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  await window.__test__.computeCandidateGroups();
+
+  const stats = window.__test__.state.travelTimeStats;
+  assert.ok(stats && stats.total > 0, "expected travel-time provenance to be recorded");
+  assert.equal(stats.routed + stats.estimated, stats.total);
+
+  window.__test__.renderCandidateCards();
+  const note = window.document.querySelector("#candidateCards .source-note");
+  assert.ok(note, "expected a note saying where travel times came from");
+  assert.match(note.textContent, /Digitransit/);
+
+  // The dev server answers every routing request, so nothing should be an
+  // estimate here — the warning variant only appears when routing fails.
+  assert.equal(stats.estimated, 0, "dev server routes every pair");
+  assert.ok(note.classList.contains("source-note-ok"), `unexpected class: ${note.className}`);
+});
+
+test("UI smoke: falling back to estimates is reported, not hidden", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  // Simulate the routing API being unreachable, which is what a bad
+  // DIGITRANSIT_API_KEY looks like from the frontend.
+  window.__test__.state.travelTimeStats = { total: 40, routed: 0, estimated: 40 };
+  window.__test__.state.travelTimeError = "HTTP 401 invalid subscription key";
+  window.__test__.renderCandidateCards();
+
+  const note = window.document.querySelector("#candidateCards .source-note");
+  assert.ok(note.classList.contains("source-note-warn"));
+  assert.match(note.textContent, /40 \(100%\) fell back to straight-line estimates/);
+  assert.match(note.textContent, /401 invalid subscription key/);
+});
+
 test("UI smoke: cards are ordered strongest first", async () => {
   const window = buildWindow();
   await window.__test__.init();
