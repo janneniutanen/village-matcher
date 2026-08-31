@@ -29,6 +29,46 @@ const MODE_MODEL = {
   B: { speedKmh: 15, overheadMin: 8 }, // Bicycle
 };
 
+// Fastest a mode could plausibly average over a straight line. Real routes are
+// longer than straight lines, so a journey implying more than this isn't a slow
+// day or a detour — it's a wrong number. Set generously against measured
+// Uusimaa journeys (commuter rail to Hyvinkää implies 69 km/h straight-line,
+// motorway driving 65) because the job is catching order-of-magnitude errors,
+// not shaving edge cases.
+const MODE_MAX_KMH = { W: 10, B: 40, D: 130, P: 120 };
+
+// How much slower than the speed model a real route may be before the number
+// stops looking like a journey. Generous: awkward transit with two transfers
+// legitimately runs 2-3x the model. An absolute time cap was tried first and
+// was the wrong tool — it rejected long-but-honest journeys, like walking
+// across Uusimaa, which are arithmetically fine and simply fail the travel
+// constraint later.
+const SLOWEST_PLAUSIBLE_FACTOR = 5;
+
+// A routed time is only worth more than an estimate if it's actually a
+// journey. This exists because a routing call can succeed — HTTP 200, no
+// errors — and still return something impossible: a unit mix-up, a truncated
+// value, a profile the router silently ignored. Those look identical to good
+// data downstream, and the travel-time provenance note counts any number as
+// "routed", so they have to be caught here.
+function travelTimePlausible(minutes, distanceKm, mode) {
+  if (typeof minutes !== 'number' || !isFinite(minutes) || minutes <= 0) return false;
+  if (!isFinite(distanceKm) || distanceKm <= 0) return true; // same address
+
+  // Too fast to be that mode — a car time returned for a walk, or minutes
+  // where seconds were meant.
+  const ceiling = MODE_MAX_KMH[mode];
+  if (ceiling && distanceKm / (minutes / 60) > ceiling) return false;
+
+  // Too slow to be a journey at all — seconds returned where minutes were
+  // meant. Measured against the speed model rather than the clock, so a mode's
+  // fixed overhead doesn't make short trips look wrong.
+  const expected = estimateTravelTime(distanceKm, mode);
+  if (isFinite(expected) && expected > 0 && minutes > expected * SLOWEST_PLAUSIBLE_FACTOR) return false;
+
+  return true;
+}
+
 function estimateTravelTime(distanceKm, mode) {
   const m = MODE_MODEL[mode];
   if (!m) return Infinity;
@@ -266,6 +306,9 @@ function findReplacementCandidates(existingMembers, pool, settings, travelTimeFn
 const MatchingEngine = {
   haversineKm,
   MODE_MODEL,
+  MODE_MAX_KMH,
+  SLOWEST_PLAUSIBLE_FACTOR,
+  travelTimePlausible,
   estimateTravelTime,
   sharedModes,
   monthsSinceEpoch,

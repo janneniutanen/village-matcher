@@ -279,6 +279,22 @@ test("UI smoke: candidate view states where travel times came from", async () =>
   assert.ok(note.classList.contains("source-note-ok"), `unexpected class: ${note.className}`);
 });
 
+test("UI smoke: implausible routed times are reported separately from missing ones", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  // A routing service that answers with impossible numbers is a different
+  // problem from one that is unreachable, and the note must say which.
+  window.__test__.state.travelTimeStats = { total: 40, routed: 36, estimated: 4, rejected: 4 };
+  window.__test__.state.travelTimeError = "implausible routed time (7 min for 2.2 km by W)";
+  window.__test__.renderCandidateCards();
+
+  const note = window.document.querySelector("#candidateCards .source-note");
+  assert.ok(note.classList.contains("source-note-warn"));
+  assert.match(note.textContent, /4 routed journeys were discarded as impossible/);
+  assert.match(note.textContent, /implausible routed time/);
+});
+
 test("UI smoke: falling back to estimates is reported, not hidden", async () => {
   const window = buildWindow();
   await window.__test__.init();

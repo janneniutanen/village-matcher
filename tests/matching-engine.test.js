@@ -29,6 +29,52 @@ test("haversineKm: rough sanity check against a known Helsinki distance", () => 
   assert.ok(km > 14 && km < 20, `expected ~14-20km, got ${km}`);
 });
 
+test("travelTimePlausible: accepts real measured journeys", () => {
+  // All measured against the live Digitransit router for a 2.19km pair.
+  assert.equal(Engine.travelTimePlausible(42.1, 2.19, "W"), true, "walk");
+  assert.equal(Engine.travelTimePlausible(13.3, 2.19, "B"), true, "bike");
+  assert.equal(Engine.travelTimePlausible(6.0, 2.19, "D"), true, "drive");
+  assert.equal(Engine.travelTimePlausible(31.3, 2.19, "P"), true, "transit");
+  // Long-distance journeys that are genuinely slow.
+  assert.equal(Engine.travelTimePlausible(62.1, 45.7, "P"), true, "Kallio to Porvoo");
+  assert.equal(Engine.travelTimePlausible(45, 51.5, "P"), true, "commuter rail to Hyvinkää");
+  assert.equal(Engine.travelTimePlausible(800, 60, "W"), true, "a 60km walk is long, not impossible");
+  assert.equal(Engine.travelTimePlausible(6.4, 0.1, "P"), true, "short transit, fixed overhead dominates");
+});
+
+test("travelTimePlausible: rejects a car time returned for a walk", () => {
+  // Regression: the OSRM demo server routed every profile as a car, so a
+  // 2.19km walk came back as 6.7 minutes — 20 km/h, which is running.
+  assert.equal(Engine.travelTimePlausible(6.7, 2.19, "W"), false);
+});
+
+test("travelTimePlausible: rejects unit mix-ups in both directions", () => {
+  assert.equal(Engine.travelTimePlausible(1806, 2.19, "P"), false, "seconds read as minutes");
+  assert.equal(Engine.travelTimePlausible(402, 2.19, "W"), false, "seconds read as minutes");
+  assert.equal(Engine.travelTimePlausible(0.5, 2.19, "W"), false, "minutes read as seconds");
+});
+
+test("travelTimePlausible: rejects values that are not journeys", () => {
+  assert.equal(Engine.travelTimePlausible(0, 2, "P"), false);
+  assert.equal(Engine.travelTimePlausible(-5, 2, "P"), false);
+  assert.equal(Engine.travelTimePlausible(NaN, 2, "P"), false);
+  assert.equal(Engine.travelTimePlausible(Infinity, 2, "P"), false);
+  assert.equal(Engine.travelTimePlausible("30", 2, "P"), false, "a string is not a number");
+});
+
+test("travelTimePlausible: nothing to check against still passes", () => {
+  // Same address, or a mode with no speed model — no basis to call it wrong.
+  assert.equal(Engine.travelTimePlausible(5, 0, "W"), true);
+  assert.equal(Engine.travelTimePlausible(5, 2, "unknown-mode"), true);
+});
+
+test("travelTimePlausible: does not catch a merely wrong-but-believable time", () => {
+  // Honest limitation. The stale-departure bug returned 60.6 minutes for a
+  // trip that takes 30.1 — twice too long, but well inside the plausible
+  // envelope. That class has to be prevented at source, not detected here.
+  assert.equal(Engine.travelTimePlausible(60.6, 8.1, "P"), true);
+});
+
 test("sharedModes: returns the intersection of two transport lists", () => {
   const a = mom({ transport: ["bus", "car"] });
   const b = mom({ transport: ["car", "walk"] });

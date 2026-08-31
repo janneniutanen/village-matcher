@@ -138,6 +138,7 @@ const state = {
   usingBackendData:  false,
   travelTimeStats: null,
   travelTimeError: null,
+  travelTimeRejected: 0,
 };
 
 // ---------------------------------------------------------------------------
@@ -220,11 +221,31 @@ async function ensureTravelTimes(pairsNeeded) {
     }));
   if (toFetch.length === 0) return;
 
+  const requested = new Map(toFetch.map((p) => [p.id, p]));
+
   try {
     const results = await callBackend('travelTime', { pairs: toFetch });
     results.forEach((r) => {
-      if (typeof r.minutes === 'number') cacheSet(r.id, { minutes: r.minutes });
-      else if (r.error && !state.travelTimeError) state.travelTimeError = r.error;
+      if (typeof r.minutes !== 'number') {
+        if (r.error && !state.travelTimeError) state.travelTimeError = r.error;
+        return;
+      }
+      // A successful call can still return an impossible number. Caching one
+      // is worse than falling back to an estimate, because it would be counted
+      // and displayed as a real routed journey.
+      const pair = requested.get(r.id);
+      const km   = pair
+        ? MatchingEngine.haversineKm([pair.from.lat, pair.from.lon], [pair.to.lat, pair.to.lon])
+        : NaN;
+      if (pair && !MatchingEngine.travelTimePlausible(r.minutes, km, pair.mode)) {
+        state.travelTimeRejected = (state.travelTimeRejected || 0) + 1;
+        if (!state.travelTimeError) {
+          state.travelTimeError =
+            `implausible routed time (${r.minutes.toFixed(0)} min for ${km.toFixed(1)} km by ${pair.mode})`;
+        }
+        return;
+      }
+      cacheSet(r.id, { minutes: r.minutes });
     });
   } catch (err) {
     console.warn('Travel-time backend call failed, falling back to estimates:', err.message);
@@ -270,6 +291,7 @@ async function computeCandidateGroups() {
     }
   }
   state.travelTimeError = null;
+  state.travelTimeRejected = 0;
   await ensureTravelTimes(pairsNeeded);
 
   // Lisa asked whether the tool really checks public transport times. It does,
@@ -277,7 +299,12 @@ async function computeCandidateGroups() {
   // estimate, which is indistinguishable in the output — so count which is
   // which and say so.
   const routed = pairsNeeded.filter(({ a, b, mode }) => cacheGet(travelCacheKey(a.id, b.id, mode))).length;
-  state.travelTimeStats = { total: pairsNeeded.length, routed, estimated: pairsNeeded.length - routed };
+  state.travelTimeStats = {
+    total: pairsNeeded.length,
+    routed,
+    estimated: pairsNeeded.length - routed,
+    rejected: state.travelTimeRejected || 0,
+  };
 
   // clusterGroups already returns strongest-first; the score is recomputed
   // here for display rather than widening its return type.
@@ -505,12 +532,17 @@ function scorePanel(score) {
 function travelSourceNote() {
   const s = state.travelTimeStats;
   if (!s || !s.total) return '';
-  if (s.estimated === 0) {
+  if (s.estimated === 0 && !s.rejected) {
     return `<div class="source-note source-note-ok">Travel times: all ${s.routed} journeys routed via HSL/Digitransit.</div>`;
   }
   const pct = Math.round((s.estimated / s.total) * 100);
-  const why = state.travelTimeError ? ` Last error: ${escHtml(state.travelTimeError)}` : '';
-  return `<div class="source-note source-note-warn">Travel times: ${s.routed} of ${s.total} journeys routed via HSL/Digitransit; ${s.estimated} (${pct}%) fell back to straight-line estimates, which are less accurate.${why}</div>`;
+  // Rejected journeys are called out separately: a routing service returning
+  // impossible numbers is a different problem from one being unreachable.
+  const bad = s.rejected
+    ? ` ${s.rejected} routed ${s.rejected === 1 ? 'journey was' : 'journeys were'} discarded as impossible for the distance.`
+    : '';
+  const why = state.travelTimeError ? ` Last problem: ${escHtml(state.travelTimeError)}` : '';
+  return `<div class="source-note source-note-warn">Travel times: ${s.routed} of ${s.total} journeys routed via HSL/Digitransit; ${s.estimated} (${pct}%) fell back to straight-line estimates, which are less accurate.${bad}${why}</div>`;
 }
 
 function renderCandidateCards() {

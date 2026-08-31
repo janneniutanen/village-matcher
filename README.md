@@ -220,7 +220,16 @@ Public transport times come from Digitransit's scheduled router
 (`planConnection`), asked for at a fixed weekday mid-morning so results don't
 depend on when matching is run, and including the wait for the first departure.
 Walking, cycling and driving come from the same router, asked for one mode at
-a time. If a routing call fails, the engine
+a time.
+
+Every routed value is checked before it is used: too fast for the mode over
+that distance, or far slower than the speed model allows, and it is discarded
+in favour of an estimate and counted separately in the note. This catches a
+routing call that succeeds but answers with something impossible — a unit
+mix-up, or a router silently ignoring the requested mode. It does not catch a
+time that is merely wrong but believable; that has to be prevented at source.
+
+If a routing call fails, the engine
 falls back to a straight-line speed estimate from `MODE_MODEL` — the New
 Matches tab states how many journeys were routed and how many were estimated,
 because a dead routing API otherwise looks identical to a healthy one.
