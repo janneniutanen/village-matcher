@@ -93,6 +93,64 @@ test("parseMaxTravel: rejects non-numeric, zero, negative, and absurd values", (
   assert.equal(Validation.parseMaxTravel(999), null);
 });
 
+test("parseMaxTravel: minute answers in free text", () => {
+  assert.equal(Validation.parseMaxTravel("about 20 min"), 20);
+  assert.equal(Validation.parseMaxTravel("30 minutes"), 30);
+  assert.equal(Validation.parseMaxTravel("45 min"), 45);
+  assert.equal(Validation.parseMaxTravel("90 minutes"), 90);
+});
+
+test("parseMaxTravel: hour answers are converted to minutes", () => {
+  assert.equal(Validation.parseMaxTravel("2 hours"), 120);
+  assert.equal(Validation.parseMaxTravel("1 hour"), 60);
+  assert.equal(Validation.parseMaxTravel("3 hours"), 180);
+});
+
+test("parseMaxTravel: the cap is applied after the hour conversion, not before", () => {
+  // Regression: the range check used to run on the pre-conversion number, so
+  // anything containing "hour" could exceed the cap once multiplied by 60.
+  assert.equal(Validation.parseMaxTravel("4 hours"), null);
+  assert.equal(Validation.parseMaxTravel("5 hours"), null);
+  assert.equal(Validation.parseMaxTravel("24 hours"), null);
+});
+
+test("parseMaxTravel: combined hour and minute answers", () => {
+  // Regression: stripping every non-digit turned "1 hour 30" into 130, then
+  // multiplied it by 60 for 7800 minutes.
+  assert.equal(Validation.parseMaxTravel("1 hour 30"), 90);
+  assert.equal(Validation.parseMaxTravel("1 hour 30 min"), 90);
+  assert.equal(Validation.parseMaxTravel("1h30"), 90);
+});
+
+test("parseMaxTravel: accepts both decimal separators", () => {
+  // Regression: stripping non-digits turned "1,5 hours" into 15, then 900.
+  assert.equal(Validation.parseMaxTravel("1,5 hours"), 90);
+  assert.equal(Validation.parseMaxTravel("1.5 hours"), 90);
+  assert.equal(Validation.parseMaxTravel("2,5 hours"), 150);
+  assert.equal(Validation.parseMaxTravel("1,5 h"), 90);
+});
+
+test("parseMaxTravel: \"Doesn't matter\" maps to the cap", () => {
+  assert.equal(Validation.parseMaxTravel("Doesn't matter"), Validation.MAX_TRAVEL_MINUTES);
+  assert.equal(Validation.parseMaxTravel("Doesn't matter"), 180);
+});
+
+test("parseMaxTravel: returns whole minutes", () => {
+  assert.equal(Validation.parseMaxTravel("1,25 hours"), 75);
+  assert.equal(Validation.parseMaxTravel("0,7 hours"), 42);
+  // Never a fraction, so downstream arithmetic stays in integers.
+  assert.equal(Number.isInteger(Validation.parseMaxTravel("1,33 hours")), true);
+});
+
+test("parseMaxTravel: unparseable and out-of-range values stay rejected", () => {
+  assert.equal(Validation.parseMaxTravel("half an hour"), null);
+  assert.equal(Validation.parseMaxTravel("0 hours"), null);
+  assert.equal(Validation.parseMaxTravel(""), null);
+  assert.equal(Validation.parseMaxTravel(null), null);
+  assert.equal(Validation.parseMaxTravel(undefined), null);
+  assert.doesNotThrow(() => Validation.parseMaxTravel({}));
+});
+
 test("normalizeApplicant: a fully valid row is eligible with no issues", () => {
   const raw = {
     id: "A001", name: "Lisa", neighborhood: "Kallio", street: "Vaasankatu 5",
