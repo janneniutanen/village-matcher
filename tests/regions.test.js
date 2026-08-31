@@ -25,13 +25,23 @@ test("districtCentre: covers every neighbourhood in the sample dataset", () => {
   assert.deepEqual(missing, [], `districts without coordinates: ${missing.join(", ")}`);
 });
 
-test("withinDistrict: accepts nearby points, rejects far ones", () => {
-  const kallio = Regions.districtCentre("Kallio");
-  assert.equal(Regions.withinDistrict(kallio, [60.19, 24.95]), true);
+test("withinAnchor: accepts nearby points, rejects far ones", () => {
+  const kallio = Regions.resolveDistrict("Kallio");
+  assert.equal(Regions.withinAnchor(kallio, [60.19, 24.95]), true);
   // Joensuu, ~400km away — the kind of match the geocoder returns at 0.96
   // confidence when it ignores the municipality.
-  assert.equal(Regions.withinDistrict(kallio, [62.60, 29.76]), false);
-  assert.equal(Regions.withinDistrict(null, [60.19, 24.95]), false, "no centre means nothing to verify against");
+  assert.equal(Regions.withinAnchor(kallio, [62.60, 29.76]), false);
+  assert.equal(Regions.withinAnchor(null, [60.19, 24.95]), false, "no anchor means nothing to verify against");
+});
+
+test("withinAnchor: a municipality anchor uses its own wider radius", () => {
+  // Vuosaari is ~13km from Helsinki centre: outside a district radius, but
+  // inside Helsinki, so "Helsinki" as the neighbourhood must still accept it.
+  const city = Regions.resolveDistrict("Helsinki");
+  const district = Regions.resolveDistrict("Kallio");
+  const vuosaari = Regions.DISTRICT_COORDS["Vuosaari"];
+  assert.equal(Regions.withinAnchor(city, vuosaari), true, "city radius should reach Vuosaari");
+  assert.equal(Regions.withinAnchor(district, [59.90, 23.50]), false, "district radius must stay tight");
 });
 
 test("distanceKm: zero for identical points, sane for a known pair", () => {
@@ -141,4 +151,13 @@ test("streetNameMatches: messy input is sanitised before comparison", () => {
   assert.equal(Regions.streetNameMatches("Vaasankatu 5 as 3", "Vaasankatu 5, Helsinki"), true);
   assert.equal(Regions.streetNameMatches("Vaasankatu5", "Vaasankatu 5 F, Helsinki"), true);
   assert.equal(Regions.streetNameMatches("Vaasankatu 5, 00500 Helsinki", "Vaasankatu 5, Helsinki"), true);
+});
+
+test("normalizeStreet: numbered and ordinal street names survive", () => {
+  // Kallio has "Kolmas linja" and neighbours; people also write these as
+  // ordinals, and the leading number must not be read as a house number.
+  assert.equal(Regions.normalizeStreet("Kolmas linja 5"), "Kolmas linja 5");
+  assert.equal(Regions.normalizeStreet("3. linja 5"), "3. linja 5");
+  assert.equal(Regions.normalizeStreet("3. linja 5 as 2"), "3. linja 5");
+  assert.equal(Regions.streetNameMatches("Kolmas linja 5", "Kolmas linja 7, Helsinki"), true);
 });

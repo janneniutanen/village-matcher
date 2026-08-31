@@ -175,6 +175,29 @@ test("settings: round-trip save and read, including group size", async () => {
   assert.equal(result.maxGroupSize, 6);
 });
 
+test("representativeDeparture: always a future weekday morning, never cached", () => {
+  const api = require("../netlify/functions/api.js");
+
+  // Regression: this used to be cached in a module-level variable. server.js is
+  // a long-lived process, so the cached date drifted into the past, and the
+  // router answers a stale date with a plausible-looking but wrong duration —
+  // measured at 60.6 minutes for a trip that takes 30.1 when asked correctly.
+  const iso = api.representativeDeparture();
+  const when = new Date(iso);
+  assert.ok(!isNaN(when.getTime()), `unparseable departure: ${iso}`);
+  assert.ok(when > new Date(), `departure must be in the future, got ${iso}`);
+
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "Europe/Helsinki", weekday: "short" }).format(when);
+  assert.ok(!["Sat", "Sun"].includes(weekday), `expected a weekday, got ${weekday}`);
+
+  const hour = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Helsinki", hour: "2-digit", hour12: false }).format(when);
+  assert.equal(hour, "10", "should ask for a mid-morning departure");
+
+  // Recomputed rather than memoised, so it cannot go stale in a long-lived
+  // process. Two calls agree today, but neither is a frozen startup value.
+  assert.equal(api.representativeDeparture(), iso);
+});
+
 test("geocode / travelTime / isochrone stubs respond in the shape the front end expects", async () => {
   // The frontend sends structured entries so the backend can anchor the search
   // to the district; results must carry `precise` either way.

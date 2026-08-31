@@ -438,8 +438,8 @@ async function geocodeBatch(entries) {
       // With a known district, check the hit is actually near it. Without one,
       // the best available check is that the returned municipality matches
       // what the organizer typed.
-      const inArea = centre
-        ? Regions.distanceKm(centre, [lat, lon]) <= anchor.radiusKm
+      const inArea = anchor
+        ? Regions.withinAnchor(anchor, [lat, lon])
         : !!(town && neighborhood && town.trim().toLowerCase() === neighborhood.trim().toLowerCase());
       const sameStreet = Regions.streetNameMatches(street, label);
       const precise    = inArea && sameStreet;
@@ -468,9 +468,12 @@ async function geocodeBatch(entries) {
 const OSRM_PROFILE = { W: 'foot', B: 'bike', D: 'car' };
 
 async function travelTimeBatch(pairs) {
+  const departure = representativeDeparture();
   return Promise.all(pairs.map(async (p) => {
     try {
-      const minutes = p.mode === 'P' ? await transitMinutes(p.from, p.to) : await osrmMinutes(p.from, p.to, p.mode);
+      const minutes = p.mode === 'P'
+        ? await transitMinutes(p.from, p.to, departure)
+        : await osrmMinutes(p.from, p.to, p.mode);
       return { id: p.id, minutes };
     } catch (err) {
       return { id: p.id, error: err.message };
@@ -492,13 +495,14 @@ async function osrmMinutes(from, to, mode) {
 // what time of day the organizer happens to run matching. A weekday mid-
 // morning is when these groups actually meet.
 //
-// Cached for the life of the function instance so every pair in a run is
-// compared against the same moment.
-let _departureIso = null;
-
+// Deliberately not cached across calls. server.js is a long-lived process, so
+// a value cached at startup drifts into the past, and the router answers a
+// stale date with a plausible-looking but wrong duration: HTTP 200, no GraphQL
+// errors, no real service found. That is indistinguishable from a healthy
+// answer downstream, which is the exact failure mode this file is trying to
+// eliminate. Computed once per batch instead, so every pair in a run still
+// shares one reference moment.
 function representativeDeparture() {
-  if (_departureIso) return _departureIso;
-
   const parts = (date) =>
     new Intl.DateTimeFormat('en-CA', {
       timeZone: 'Europe/Helsinki',
@@ -519,15 +523,12 @@ function representativeDeparture() {
     timeZone: 'Europe/Helsinki', timeZoneName: 'longOffset',
   }).formatToParts(d).find((p) => p.type === 'timeZoneName').value.replace('GMT', '') || '+00:00';
 
-  _departureIso = `${year}-${month}-${day}T10:00:00${offset}`;
-  return _departureIso;
+  return `${year}-${month}-${day}T10:00:00${offset}`;
 }
 
-async function transitMinutes(from, to) {
+async function transitMinutes(from, to, departure = representativeDeparture()) {
   const key = process.env.DIGITRANSIT_API_KEY;
   if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
-
-  const departure = representativeDeparture();
 
   // planConnection is the scheduled OTP2 API — it consults timetables, unlike
   // the older `plan` field which returned the same duration at 03:00 as at
@@ -622,6 +623,10 @@ async function dispatch(body) {
 // ---------------------------------------------------------------------------
 // Netlify handler
 // ---------------------------------------------------------------------------
+// Exported for tests: the freshness of this value is load-bearing, since the
+// router answers a past date with a plausible but wrong duration.
+exports.representativeDeparture = representativeDeparture;
+
 exports.handler = async (event) => {
   const json = (statusCode, payload) => ({
     statusCode,

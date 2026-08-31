@@ -117,10 +117,14 @@ function addToIndex(name, coords, radiusKm) {
 Object.entries(DISTRICT_COORDS).forEach(([name, coords]) => addToIndex(name, coords, DISTRICT_RADIUS_KM));
 Object.entries(MUNICIPALITY_COORDS).forEach(([name, coords]) => addToIndex(name, coords, MUNICIPALITY_RADIUS_KM));
 // A couple of spellings that come up but aren't the official form.
-[["espoo keskus", "Espoon keskus"], ["helsingfors", "Helsinki"], ["esbo", "Espoo"], ["vanda", "Vantaa"]]
+[["Espoo keskus", "Espoon keskus"], ["Helsingfors", "Helsinki"], ["Esbo", "Espoo"], ["Vanda", "Vantaa"]]
   .forEach(([alias, target]) => {
     const hit = INDEX.get(indexKey(target));
-    if (hit) INDEX.set(alias, hit);
+    // Through indexKey/foldedKey like every other entry, so an alias added
+    // later with capitals or diacritics still resolves.
+    if (hit) for (const key of [indexKey(alias), foldedKey(alias)]) {
+      if (key && !INDEX.has(key)) INDEX.set(key, hit);
+    }
   });
 
 // Resolves the Neighbourhood cell to something to anchor the geocoder on.
@@ -193,8 +197,14 @@ function distanceKm([lat1, lon1], [lat2, lon2]) {
   return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
 }
 
-function withinDistrict(centre, point) {
-  return !!centre && distanceKm(centre, point) <= DISTRICT_RADIUS_KM;
+// Takes the whole anchor rather than just its centre, because a municipality
+// anchor is coarser than a district one and needs its own radius. An earlier
+// version hardcoded DISTRICT_RADIUS_KM here, which meant the live geocode path
+// couldn't use it and reimplemented the check inline.
+function withinAnchor(anchor, point) {
+  if (!anchor || !anchor.coords) return false;
+  const radius = anchor.radiusKm || DISTRICT_RADIUS_KM;
+  return distanceKm(anchor.coords, point) <= radius;
 }
 
 // Strips the house number so two spellings of the same street compare equal:
@@ -238,7 +248,7 @@ const Regions = {
   MUNICIPALITY_COORDS,
   MUNICIPALITY_RADIUS_KM,
   distanceKm,
-  withinDistrict,
+  withinAnchor,
   streetName,
   streetNameMatches,
 };

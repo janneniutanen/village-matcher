@@ -229,10 +229,14 @@ forms a group before someone better connected takes their only option.
 
 ## Known simplifications
 
-- Greedy best-fit clustering heuristic, not an optimal solver. Seeds are
-  claimed in date-of-birth order, so an early group can still take someone a
-  later group needed more.
-- Neighbourhood matching is exact-string (sheet typos create separate groups)
+- Greedy best-fit clustering heuristic, not an optimal solver. Seeds are taken
+  most-constrained-first, which helps, but a group formed early can still take
+  someone a later group needed more — members are never reconsidered once
+  placed.
+- The neighbourhood *filter* and the group naming still compare the
+  Neighbourhood column as an exact string, so two spellings of one district read
+  as two places there. Geocoding is tolerant of spelling (see Messy addresses);
+  this bullet is only about the filter and the generated group name.
 - Per-member outreach stage tracking was removed along with the village
   rewrite. `Match Status` is still written on approval, but the UI no longer
   advances it through contacted/confirmed/introduced, and only the first

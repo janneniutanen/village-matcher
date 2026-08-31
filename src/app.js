@@ -144,9 +144,13 @@ const state = {
 // Travel time: cache + backend, falling back to MatchingEngine estimates
 // ---------------------------------------------------------------------------
 
+// Directional. Transit A->B and B->A genuinely differ, and the matching model
+// compares each person's own journey against their own limit, so collapsing
+// the two into one slot threw away half the data — computeCandidateGroups
+// already requests both directions, so a sorted key meant the second result
+// simply overwrote the first.
 function travelCacheKey(idA, idB, mode) {
-  const [x, y] = [idA, idB].sort();
-  return `travel:${x}:${y}:${mode}`;
+  return `travel:${idA}>${idB}:${mode}`;
 }
 
 function getTravelMinutes(a, b, mode) {
