@@ -19,7 +19,7 @@ const assert = require("node:assert/strict");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("node:child_process");
-const { JSDOM } = require("jsdom");
+const { JSDOM, VirtualConsole } = require("jsdom");
 
 const SERVER_PATH = path.join(__dirname, "..", "local-test-server.js");
 const CSV_PATH = path.join(__dirname, "..", "mock-applicants.csv");
@@ -79,7 +79,14 @@ function buildWindow() {
   const htmlWithoutScripts = rawHtml.replace(/<script[^>]*src="[^"]*"[^>]*><\/script>/g, "");
   // Include ?backend= so API_URL in app.js resolves to the local server,
   // and pre-set the password so init() skips the gate (local server ignores it).
-  const dom = new JSDOM(htmlWithoutScripts, { url: `http://localhost/?backend=${BASE_URL}`, runScripts: "dangerously" });
+  // Forward the page's console to the test output. jsdom discards it by
+  // default, which hides the console.warn that app.js emits when a backend
+  // call fails — so a broken fetch looked like an empty result set.
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on("warn",  (msg) => console.error("  [page warn]", msg));
+  virtualConsole.on("error", (msg) => console.error("  [page error]", msg));
+  virtualConsole.on("jsdomError", (err) => console.error("  [jsdom error]", err.message));
+  const dom = new JSDOM(htmlWithoutScripts, { url: `http://localhost/?backend=${BASE_URL}`, runScripts: "dangerously", virtualConsole });
   const { window } = dom;
 
   window.L = fakeLeaflet();

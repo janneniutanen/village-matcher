@@ -59,7 +59,25 @@ function syncToBackend(action, payload) {
   });
 }
 
+// Not re-entrant on its own: the function replaces state.applicants and then
+// awaits geocoding, so a second concurrent call would swap the array out from
+// under the first and the geocode results would land on orphaned objects,
+// leaving everyone without coordinates. Concurrent callers share one load
+// instead — this happens for real when the organizer hits Sync while the
+// initial load is still running.
+let loadInFlight = null;
+
 async function loadFromBackend() {
+  if (loadInFlight) return loadInFlight;
+  loadInFlight = loadFromBackend_();
+  try {
+    return await loadInFlight;
+  } finally {
+    loadInFlight = null;
+  }
+}
+
+async function loadFromBackend_() {
   try {
     const [applicants, groups, templates, settings] = await Promise.all([
       callBackend('getApplicants', {}),
@@ -72,8 +90,14 @@ async function loadFromBackend() {
       const prev = prevById[a.id];
       return {
         ...a,
-        coords:       prev?.geocodedReal ? prev.coords : [60.1699 + (Math.random() - 0.5) * 0.05, 24.9384 + (Math.random() - 0.5) * 0.1],
-        geocodedReal: prev?.geocodedReal || false,
+        // No coordinate until geocoding produces one. Inventing a random
+        // point near Helsinki (which this used to do) doesn't just misplace a
+        // pin — it fabricates distances that the matching engine then treats
+        // as real.
+        coords:        prev?.geocodedReal ? prev.coords : null,
+        geocodedReal:  prev?.geocodedReal || false,
+        geocodeLabel:  prev?.geocodeLabel || null,
+        geocodeIssue:  prev?.geocodedReal ? null : 'Address not geocoded yet',
       };
     });
     await ensureGeocoded(state.applicants);
@@ -148,18 +172,32 @@ async function ensureGeocoded(applicants) {
   if (toFetch.length === 0) return;
 
   try {
-    const addresses = toFetch.map((a) => `${a.street}, ${a.neighborhood}, Finland`);
+    // Structured, so the backend can anchor the search to the district rather
+    // than hoping the geocoder respects a municipality buried in free text.
+    const addresses = toFetch.map((a) => ({ street: a.street, neighborhood: a.neighborhood }));
     const results   = await callBackend('geocode', { addresses });
     results.forEach((r, i) => {
       const a = toFetch[i];
-      if (typeof r.lat === 'number') {
-        a.coords      = [r.lat, r.lon];
+      a.geocodeLabel = r.label || null;
+      if (typeof r.lat === 'number' && r.precise) {
+        a.coords       = [r.lat, r.lon];
         a.geocodedReal = true;
+        a.geocodeIssue = null;
         cacheSet('geocode:' + a.street + ', ' + a.neighborhood, r);
+      } else {
+        // Either nothing was found, or the geocoder only managed to place the
+        // address at street/city level. Say which, so the organizer can fix
+        // the row instead of wondering why the pin is in the wrong place.
+        a.coords       = null;
+        a.geocodedReal = false;
+        a.geocodeIssue = r.error
+          ? `Address not found: ${r.error}`
+          : `Address only matched loosely${r.label ? ` (got "${r.label}")` : ''} — needs a more exact street address`;
       }
     });
   } catch (err) {
-    console.warn('Geocoding failed, using approximate coordinates:', err.message);
+    console.warn('Geocoding call failed:', err.message);
+    toFetch.forEach((a) => { a.geocodeIssue = `Geocoding unavailable: ${err.message}`; });
   }
 }
 
@@ -191,10 +229,13 @@ async function ensureTravelTimes(pairsNeeded) {
 // ---------------------------------------------------------------------------
 
 async function computeCandidateGroups() {
+  // geocodedReal is a hard requirement: without a real coordinate there is no
+  // honest travel time, and matching on a guess is worse than not matching.
   const pool = state.applicants.filter(
     (a) =>
       a.matchStatus === 'unmatched' &&
       a.eligibleForMatching &&
+      a.geocodedReal &&
       (state.settings.neighborhoodFilter === 'all' || a.neighborhood === state.settings.neighborhoodFilter)
   );
 
@@ -342,7 +383,7 @@ function applicantCandidateColor(applicantId) {
 function renderMap() {
   pinLayer.clearLayers();
   state.applicants
-    .filter((a) => !a.hasDataIssues)
+    .filter((a) => !a.hasDataIssues && a.geocodedReal && a.coords)
     .forEach((a) => {
       const groupColor = colorForGroup(a.matchGroupId) || applicantCandidateColor(a.id);
       const isMatched  = !!groupColor;
@@ -524,7 +565,7 @@ function applicantCard(a, mapColor) {
       <div class="unmatched-summary">
         <span class="participant-id-wrap">${mapDot}<button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.id)}</button></span>
         <span>${escHtml(a.name)} · ${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span>
-        <span>${escHtml(a.coords)}</span>
+        <span>${a.geocodedReal && a.coords ? escHtml(a.coords) : '<em>no location</em>'}</span>
       </div>
       <div class="applicant-details" hidden>
         ${detailRow('Name', a.name)}
@@ -605,9 +646,14 @@ function renderActiveGroups() {
 
 function renderDataIssues() {
   const container = document.getElementById('dataIssuesList');
-  const flagged   = state.applicants.filter((a) => a.hasDataIssues);
+  // A row can be perfectly valid in the sheet but still un-geocodable, and
+  // that keeps it out of matching just as effectively, so both belong here.
+  const flagged = state.applicants
+    .map((a) => ({ a, issues: [...(a.hasDataIssues ? a.dataIssues : []), ...(a.geocodeIssue ? [a.geocodeIssue] : [])] }))
+    .filter((r) => r.issues.length > 0);
+
   container.innerHTML = flagged.length
-    ? flagged.map((a) => `<div class="mini-card issue-card"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}) — ${a.dataIssues.map(escHtml).join('; ')}</span></div>`).join('')
+    ? flagged.map(({ a, issues }) => `<div class="mini-card issue-card"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}) — ${issues.map(escHtml).join('; ')}</span></div>`).join('')
     : `<div class="empty-state">No data issues found in the current sheet.</div>`;
 }
 

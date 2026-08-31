@@ -176,9 +176,19 @@ test("settings: round-trip save and read, including group size", async () => {
 });
 
 test("geocode / travelTime / isochrone stubs respond in the shape the front end expects", async () => {
-  const geo = await call("geocode", { addresses: ["Vaasankatu 5, Kallio, Finland"] });
+  // The frontend sends structured entries so the backend can anchor the search
+  // to the district; results must carry `precise` either way.
+  const geo = await call("geocode", { addresses: [{ street: "Vaasankatu 5", neighborhood: "Kallio" }] });
   assert.equal(geo.ok, true);
   assert.equal(typeof geo.result[0].lat, "number");
+  assert.equal(geo.result[0].precise, true);
+
+  // An unrecognised district must be reported, not silently placed somewhere.
+  const bad = await call("geocode", { addresses: [{ street: "Nowherekatu 1", neighborhood: "Atlantis" }] });
+  assert.equal(bad.ok, true);
+  assert.equal(bad.result[0].precise, false);
+  assert.equal(typeof bad.result[0].error, "string");
+  assert.equal(bad.result[0].lat, undefined, "no coordinate may be invented for an unplaceable address");
 
   // Modes on the wire are the normalized codes: W walk, D drive, P transit, B bike.
   const travel = await call("travelTime", { pairs: [{ id: "p1", from: { lat: 60.18, lon: 24.95 }, to: { lat: 60.2, lon: 24.9 }, mode: "D" }] });
