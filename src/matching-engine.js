@@ -178,12 +178,42 @@ function fitsGroup(candidate, group, settings, travelTimeFn) {
 // the group only if it reached minGroupSize, and return groups strongest
 // first. Still a heuristic, not an optimal solver — seeds are claimed in
 // order, so an early group can take someone a later group needed more.
+// How many others each person could travel to meet. Someone reachable by only
+// two people has to be seeded before a well-connected person absorbs one of
+// them, or they end up unmatched through no fault of their own.
+function travelPartnerCounts(pool, settings, travelTimeFn) {
+  const counts = new Map(pool.map((p) => [p.id, 0]));
+  for (let i = 0; i < pool.length; i++) {
+    for (let j = i + 1; j < pool.length; j++) {
+      if (pairwiseTravelOk(pool[i], pool[j], settings, travelTimeFn)) {
+        counts.set(pool[i].id, counts.get(pool[i].id) + 1);
+        counts.set(pool[j].id, counts.get(pool[j].id) + 1);
+      }
+    }
+  }
+  return counts;
+}
+
 function clusterGroups(pool, settings, travelTimeFn) {
   const sorted = [...pool].sort((a, b) => new Date(a.dob) - new Date(b.dob));
+
+  // Seeds are taken most-constrained-first rather than in sheet or
+  // date-of-birth order. Sheet order is arbitrary, and it meant whoever
+  // happened to be near the top of the spreadsheet claimed the people that
+  // someone with fewer options needed. Candidates within a group are still
+  // considered in date-of-birth order, so ties break the same way every run.
+  const partnerCounts = travelPartnerCounts(pool, settings, travelTimeFn);
+  const seedOrder = [...sorted].sort(
+    (a, b) =>
+      partnerCounts.get(a.id) - partnerCounts.get(b.id) ||
+      new Date(a.dob) - new Date(b.dob) ||
+      String(a.id).localeCompare(String(b.id))
+  );
+
   const used = new Set();
   const groups = [];
 
-  for (const seed of sorted) {
+  for (const seed of seedOrder) {
     if (used.has(seed.id)) continue;
     const group = [seed];
 
@@ -246,6 +276,7 @@ const MatchingEngine = {
   groupAgeRangeLabel,
   pairwiseTravelOk,
   meetingLegMinutes,
+  travelPartnerCounts,
   SCORE_WEIGHTS,
   travelScore,
   ageScore,

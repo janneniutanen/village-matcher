@@ -329,6 +329,36 @@ test("clusterGroups: returns groups strongest first, not in seed order", () => {
   assert.deepEqual(groups[1].map((m) => m.id).sort(), ["D", "E", "F"]);
 });
 
+test("travelPartnerCounts: counts how many others each person can meet", () => {
+  const pool = [mom({ id: "A" }), mom({ id: "B" }), mom({ id: "C" })];
+  // A can meet both; B and C are too far from each other.
+  const travel = makeGradedTravelTime({ "B-C": 200 }, 4);
+  const counts = Engine.travelPartnerCounts(pool, { maxAgeGap: 6 }, travel);
+  assert.equal(counts.get("A"), 2);
+  assert.equal(counts.get("B"), 1);
+  assert.equal(counts.get("C"), 1);
+});
+
+test("clusterGroups: seeds the most constrained person first", () => {
+  const settings = { minGroupSize: 2, maxGroupSize: 2, maxAgeGap: 6 };
+  // D can only reach C. A, B and C can all reach each other. Seeding in
+  // date-of-birth order lets A take C and leaves D unmatched; seeding the
+  // most constrained person first pairs D with C and still groups A with B.
+  const pool = [
+    mom({ id: "A", dob: "2025-06-01" }),
+    mom({ id: "B", dob: "2025-06-10" }),
+    mom({ id: "C", dob: "2025-06-20" }),
+    mom({ id: "D", dob: "2025-07-01" }),
+  ];
+  const travel = makeGradedTravelTime({ "A-D": 200, "B-D": 200 }, 4);
+  const groups = Engine.clusterGroups(pool, settings, travel);
+
+  const matched = groups.flat().map((m) => m.id).sort();
+  assert.deepEqual(matched, ["A", "B", "C", "D"], "nobody should be left out");
+  const withD = groups.find((g) => g.some((m) => m.id === "D"));
+  assert.deepEqual(withD.map((m) => m.id).sort(), ["C", "D"]);
+});
+
 test("clusterGroups: repeated runs over the same pool give the same result", () => {
   const settings = { minGroupSize: 3, maxGroupSize: 3, maxAgeGap: 6 };
   const pool = ["A", "B", "C", "D", "E", "F"].map((id) => mom({ id, dob: "2025-07-01" }));
