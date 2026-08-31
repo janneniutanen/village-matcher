@@ -187,15 +187,10 @@ function normalizeStreet(raw) {
   return s.replace(/[.\s]+$/, "");
 }
 
-function distanceKm([lat1, lon1], [lat2, lon2]) {
-  const R = 6371;
-  const dLat = ((lat2 - lat1) * Math.PI) / 180;
-  const dLon = ((lon2 - lon1) * Math.PI) / 180;
-  const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos((lat1 * Math.PI) / 180) * Math.cos((lat2 * Math.PI) / 180) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
+// Same great-circle formula the matching engine uses. Kept as one
+// implementation rather than two copies that have to stay in step; this module
+// is only ever loaded in Node, so the require is safe.
+const distanceKm = require("./matching-engine.js").haversineKm;
 
 // Takes the whole anchor rather than just its centre, because a municipality
 // anchor is coarser than a district one and needs its own radius. An earlier

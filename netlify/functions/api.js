@@ -595,8 +595,16 @@ async function isochroneReq(locations, mode, minutes) {
 // ---------------------------------------------------------------------------
 // Action dispatch
 // ---------------------------------------------------------------------------
+// Enough to follow what the frontend asked for, without dumping payloads. The
+// previous full-body log buried the terminal under 150-entry geocode batches
+// and printed applicant fields on every update.
+function describeRequest(body) {
+  const size = body.addresses?.length ?? body.pairs?.length ?? body.locations?.length;
+  return `${body.action}${size !== undefined ? ` (${size})` : ''}${body.id ? ` id=${body.id}` : ''}`;
+}
+
 async function dispatch(body) {
-  console.log(JSON.stringify(body));
+  console.log(`[api] ${describeRequest(body)}`);
   switch (body.action) {
     case 'ping':
       await ensureReady();
