@@ -66,11 +66,11 @@ test("unknown action: returns ok:false with a message, doesn't crash the server"
 test("getApplicants: loads the CSV, matches expected count and validation split", async () => {
   const { ok, result } = await call("getApplicants");
   assert.equal(ok, true);
-  assert.equal(result.length, 18);
+  assert.equal(result.length, 150);
   const flagged = result.filter((a) => a.hasDataIssues);
   const eligible = result.filter((a) => a.eligibleForMatching);
-  assert.equal(flagged.length, 3);
-  assert.equal(eligible.length, 15);
+  assert.equal(flagged.length, 6);
+  assert.equal(eligible.length, 144);
 });
 
 test("getApplicants: corrupted rows carry human-readable reasons", async () => {
@@ -79,15 +79,29 @@ test("getApplicants: corrupted rows carry human-readable reasons", async () => {
   assert.ok(outi.dataIssues.some((e) => e.includes("skateboard")));
   const riikka = result.find((a) => a.name === "Riikka");
   assert.ok(riikka.dataIssues.some((e) => e.toLowerCase().includes("neighborhood")));
+  // A row with several problems reports all of them, not just the first.
+  assert.ok(riikka.dataIssues.length >= 3, riikka.dataIssues.join(" | "));
 });
 
-test("getApplicants: valid rows have real coordin -independent fields parsed correctly", async () => {
+test("getApplicants: valid rows have coordinate-independent fields parsed correctly", async () => {
   const { result } = await call("getApplicants");
-  const lisa = result.find((a) => a.name === "Lisa");
-  assert.deepEqual(lisa.transport.sort(), ["bus", "car", "walk"]);
-  assert.deepEqual(lisa.language, ["Russian", "English"]);
-  assert.equal(lisa.phone, "+358401234501");
-  assert.equal(lisa.maxTravel, 15);
+  const eligible = result.filter((a) => a.eligibleForMatching);
+
+  eligible.forEach((a) => {
+    // Transport words from the sheet are normalized to the single-letter
+    // codes the matching engine and routing profiles are keyed by.
+    a.transport.forEach((m) => assert.match(m, /^[WDPB]$/, `${a.id} has raw mode '${m}'`));
+    assert.ok(a.transport.length > 0);
+    assert.ok(a.language.length > 0);
+    assert.match(a.phone, /^\+\d{7,15}$/, `${a.id} phone not normalized: ${a.phone}`);
+    assert.ok(a.maxTravel > 0 && a.maxTravel <= 180);
+    assert.ok(a.dob instanceof Date || !isNaN(new Date(a.dob).getTime()));
+  });
+
+  // The fixture deliberately mixes local, spaced and international formats.
+  const phones = eligible.map((a) => a.phone);
+  assert.ok(phones.some((p) => p.startsWith("+358")), "expected Finnish numbers");
+  assert.ok(phones.some((p) => !p.startsWith("+358")), "expected at least one foreign number");
 });
 
 test("full flow: approve a group, advance every stage, verify persisted state throughout", async () => {
@@ -161,15 +175,49 @@ test("settings: round-trip save and read, including group size", async () => {
   assert.equal(result.maxGroupSize, 6);
 });
 
+test("representativeDeparture: always a future weekday morning, never cached", () => {
+  const api = require("../netlify/functions/api.js");
+
+  // Regression: this used to be cached in a module-level variable. server.js is
+  // a long-lived process, so the cached date drifted into the past, and the
+  // router answers a stale date with a plausible-looking but wrong duration —
+  // measured at 60.6 minutes for a trip that takes 30.1 when asked correctly.
+  const iso = api.representativeDeparture();
+  const when = new Date(iso);
+  assert.ok(!isNaN(when.getTime()), `unparseable departure: ${iso}`);
+  assert.ok(when > new Date(), `departure must be in the future, got ${iso}`);
+
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "Europe/Helsinki", weekday: "short" }).format(when);
+  assert.ok(!["Sat", "Sun"].includes(weekday), `expected a weekday, got ${weekday}`);
+
+  const hour = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Helsinki", hour: "2-digit", hour12: false }).format(when);
+  assert.equal(hour, "10", "should ask for a mid-morning departure");
+
+  // Recomputed rather than memoised, so it cannot go stale in a long-lived
+  // process. Two calls agree today, but neither is a frozen startup value.
+  assert.equal(api.representativeDeparture(), iso);
+});
+
 test("geocode / travelTime / isochrone stubs respond in the shape the front end expects", async () => {
-  const geo = await call("geocode", { addresses: ["Vaasankatu 5, Kallio, Finland"] });
+  // The frontend sends structured entries so the backend can anchor the search
+  // to the district; results must carry `precise` either way.
+  const geo = await call("geocode", { addresses: [{ street: "Vaasankatu 5", neighborhood: "Kallio" }] });
   assert.equal(geo.ok, true);
   assert.equal(typeof geo.result[0].lat, "number");
+  assert.equal(geo.result[0].precise, true);
 
-  const travel = await call("travelTime", { pairs: [{ id: "p1", from: { lat: 60.18, lon: 24.95 }, to: { lat: 60.2, lon: 24.9 }, mode: "car" }] });
+  // An unrecognised district must be reported, not silently placed somewhere.
+  const bad = await call("geocode", { addresses: [{ street: "Nowherekatu 1", neighborhood: "Atlantis" }] });
+  assert.equal(bad.ok, true);
+  assert.equal(bad.result[0].precise, false);
+  assert.equal(typeof bad.result[0].error, "string");
+  assert.equal(bad.result[0].lat, undefined, "no coordinate may be invented for an unplaceable address");
+
+  // Modes on the wire are the normalized codes: W walk, D drive, P transit, B bike.
+  const travel = await call("travelTime", { pairs: [{ id: "p1", from: { lat: 60.18, lon: 24.95 }, to: { lat: 60.2, lon: 24.9 }, mode: "D" }] });
   assert.equal(travel.ok, true);
   assert.equal(typeof travel.result[0].minutes, "number");
 
-  const iso = await call("isochrone", { locations: [{ lat: 60.18, lon: 24.95 }], mode: "car", minutes: 15 });
+  const iso = await call("isochrone", { locations: [{ lat: 60.18, lon: 24.95 }], mode: "D", minutes: 15 });
   assert.equal(iso.ok, true);
 });

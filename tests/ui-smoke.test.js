@@ -1,5 +1,5 @@
 // UI-level smoke test: loads the REAL index.html markup and REAL app.js /
-// matching-engine.js / validation.js / mock-data.js into a jsdom window,
+// matching-engine.js / validation.js into a jsdom window,
 // pointed at a REAL local-test-server.js instance over REAL HTTP (Node's
 // built-in fetch) — the only thing faked is Leaflet itself (jsdom has no
 // map canvas/tile-rendering to test against, so map calls are stubbed to
@@ -19,7 +19,7 @@ const assert = require("node:assert/strict");
 const path = require("path");
 const fs = require("fs");
 const { spawn } = require("node:child_process");
-const { JSDOM } = require("jsdom");
+const { JSDOM, VirtualConsole } = require("jsdom");
 
 const SERVER_PATH = path.join(__dirname, "..", "local-test-server.js");
 const CSV_PATH = path.join(__dirname, "..", "mock-applicants.csv");
@@ -79,7 +79,14 @@ function buildWindow() {
   const htmlWithoutScripts = rawHtml.replace(/<script[^>]*src="[^"]*"[^>]*><\/script>/g, "");
   // Include ?backend= so API_URL in app.js resolves to the local server,
   // and pre-set the password so init() skips the gate (local server ignores it).
-  const dom = new JSDOM(htmlWithoutScripts, { url: `http://localhost/?backend=${BASE_URL}`, runScripts: "dangerously" });
+  // Forward the page's console to the test output. jsdom discards it by
+  // default, which hides the console.warn that app.js emits when a backend
+  // call fails — so a broken fetch looked like an empty result set.
+  const virtualConsole = new VirtualConsole();
+  virtualConsole.on("warn",  (msg) => console.error("  [page warn]", msg));
+  virtualConsole.on("error", (msg) => console.error("  [page error]", msg));
+  virtualConsole.on("jsdomError", (err) => console.error("  [jsdom error]", err.message));
+  const dom = new JSDOM(htmlWithoutScripts, { url: `http://localhost/?backend=${BASE_URL}`, runScripts: "dangerously", virtualConsole });
   const { window } = dom;
 
   window.L = fakeLeaflet();
@@ -88,7 +95,7 @@ function buildWindow() {
   window.navigator.clipboard = { writeText: async () => {} };
   window.localStorage.setItem("matcherPassword", "test");
 
-  const files = ["src/matching-engine.js", "src/validation.js", "src/mock-data.js", "src/app.js"];
+  const files = ["src/matching-engine.js", "src/validation.js", "src/app.js"];
   files.forEach((f) => {
     const script = window.document.createElement("script");
     script.textContent = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
@@ -117,8 +124,8 @@ test("UI smoke: init() loads real applicants from the backend into state", async
   const window = buildWindow();
   await window.__test__.init();
   assert.equal(window.__test__.state.usingBackendData, true);
-  assert.equal(window.__test__.state.applicants.length, 18);
-  assert.equal(window.__test__.state.applicants.filter((a) => a.hasDataIssues).length, 3);
+  assert.equal(window.__test__.state.applicants.length, 150);
+  assert.equal(window.__test__.state.applicants.filter((a) => a.hasDataIssues).length, 6);
 });
 
 test("UI smoke: data issues render into the DOM with readable reasons", async () => {
@@ -189,7 +196,8 @@ test("UI smoke: active groups render applicants grouped by village", async () =>
   const unmatchedList = window.document.getElementById("unmatchedList");
   assert.match(activeGroups.textContent, /Kallio Village · 2 moms/);
   assert.match(activeGroups.textContent, new RegExp(window.__test__.state.applicants[0].id));
-  assert.doesNotMatch(activeGroups.textContent, new RegExp(`${window.__test__.state.applicants[2].id}.*Sara`, "s"));
+  const excluded = window.__test__.state.applicants[2];
+  assert.doesNotMatch(activeGroups.textContent, new RegExp(`${excluded.id}.*${excluded.name}`, "s"));
   assert.doesNotMatch(unmatchedList.textContent, new RegExp(window.__test__.state.applicants[0].id));
   assert.match(unmatchedList.textContent, new RegExp(window.__test__.state.applicants[2].id));
 
@@ -221,6 +229,100 @@ test("UI smoke: running the matching engine produces candidate groups and render
   assert.equal(details.hidden, false);
   assert.match(details.textContent, /Phone/);
   assert.ok(candidateCards.querySelector(".participant-map-dot"), "expected candidate participant map color dot");
+});
+
+test("UI smoke: candidate cards show rank, total score and the breakdown", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const groups = await window.__test__.computeCandidateGroups();
+  assert.ok(groups.length >= 2, "need at least two groups to check ranking");
+
+  window.__test__.state.candidateGroups = groups;
+  window.__test__.renderCandidateCards();
+  const cards = window.document.querySelectorAll("#candidateCards .card");
+
+  // Rank badges are sequential and the score matches the engine.
+  assert.equal(cards[0].querySelector(".rank-badge").textContent, "#1");
+  assert.equal(cards[1].querySelector(".rank-badge").textContent, "#2");
+  const shown = Number(cards[0].querySelector(".badge-score").textContent.replace(/\D/g, ""));
+  assert.equal(shown, Math.round(groups[0].score.total * 100));
+
+  // All three signals are broken out, each with a bar width matching its value.
+  const rows = cards[0].querySelectorAll(".score-row");
+  assert.equal(rows.length, 3);
+  const labels = [...rows].map((r) => r.querySelector(".score-label").textContent);
+  assert.deepEqual(labels, ["Travel", "Baby age", "Language"]);
+  ["travel", "age", "language"].forEach((key, i) => {
+    const expected = Math.round(groups[0].score[key] * 100);
+    assert.equal(rows[i].querySelector(".score-value").textContent, `${expected}%`);
+    assert.equal(rows[i].querySelector(".score-fill").style.width, `${expected}%`);
+  });
+});
+
+test("UI smoke: candidate view states where travel times came from", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  await window.__test__.computeCandidateGroups();
+
+  const stats = window.__test__.state.travelTimeStats;
+  assert.ok(stats && stats.total > 0, "expected travel-time provenance to be recorded");
+  assert.equal(stats.routed + stats.estimated, stats.total);
+
+  window.__test__.renderCandidateCards();
+  const note = window.document.querySelector("#candidateCards .source-note");
+  assert.ok(note, "expected a note saying where travel times came from");
+  assert.match(note.textContent, /Digitransit/);
+
+  // The dev server answers every routing request, so nothing should be an
+  // estimate here — the warning variant only appears when routing fails.
+  assert.equal(stats.estimated, 0, "dev server routes every pair");
+  assert.ok(note.classList.contains("source-note-ok"), `unexpected class: ${note.className}`);
+});
+
+test("UI smoke: implausible routed times are reported separately from missing ones", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  // A routing service that answers with impossible numbers is a different
+  // problem from one that is unreachable, and the note must say which.
+  window.__test__.state.travelTimeStats = { total: 40, routed: 36, estimated: 4, rejected: 4 };
+  window.__test__.state.travelTimeError = "implausible routed time (7 min for 2.2 km by W)";
+  window.__test__.renderCandidateCards();
+
+  const note = window.document.querySelector("#candidateCards .source-note");
+  assert.ok(note.classList.contains("source-note-warn"));
+  assert.match(note.textContent, /4 routed journeys were discarded as impossible/);
+  assert.match(note.textContent, /implausible routed time/);
+});
+
+test("UI smoke: falling back to estimates is reported, not hidden", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  // Simulate the routing API being unreachable, which is what a bad
+  // DIGITRANSIT_API_KEY looks like from the frontend.
+  window.__test__.state.travelTimeStats = { total: 40, routed: 0, estimated: 40 };
+  window.__test__.state.travelTimeError = "HTTP 401 invalid subscription key";
+  window.__test__.renderCandidateCards();
+
+  const note = window.document.querySelector("#candidateCards .source-note");
+  assert.ok(note.classList.contains("source-note-warn"));
+  assert.match(note.textContent, /40 \(100%\) fell back to straight-line estimates/);
+  assert.match(note.textContent, /401 invalid subscription key/);
+});
+
+test("UI smoke: cards are ordered strongest first", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const groups = await window.__test__.computeCandidateGroups();
+
+  window.__test__.state.candidateGroups = groups;
+  window.__test__.renderCandidateCards();
+
+  const shown = [...window.document.querySelectorAll("#candidateCards .badge-score")]
+    .map((b) => Number(b.textContent.replace(/\D/g, "")));
+  const descending = shown.every((v, i) => i === 0 || shown[i - 1] >= v);
+  assert.ok(descending, `expected descending scores, got ${shown.join(", ")}`);
 });
 
 test("UI smoke: approving a group persists to the backend (real HTTP round trip)", async () => {
@@ -292,11 +394,14 @@ test("UI smoke: advancing status through the full pipeline reaches the backend e
 test("UI smoke: WhatsApp link is built with a normalized phone number and filled template", async () => {
   const window = buildWindow();
   await window.__test__.init();
-  const lisa = window.__test__.state.applicants.find((a) => a.name === "Lisa");
+  const person = window.__test__.state.applicants.find((a) => a.eligibleForMatching);
   window.__test__.state.templates.firstContact = "Hi {{name}} from {{neighborhood}}!";
-  const link = window.__test__.waLink(lisa, window.__test__.state.templates.firstContact, null);
-  assert.match(link, /^https:\/\/wa\.me\/358401234501\?text=/);
-  assert.match(decodeURIComponent(link), /Hi Lisa from Kallio!/);
+  const link = window.__test__.waLink(person, window.__test__.state.templates.firstContact, null);
+  // The sheet holds numbers in assorted local formats; the link must carry the
+  // normalized international number with no '+' or separators.
+  assert.match(link, new RegExp(`^https://wa\\.me/${person.phone.replace(/\D/g, "")}\\?text=`));
+  assert.match(link, /^https:\/\/wa\.me\/358\d+\?text=/);
+  assert.match(decodeURIComponent(link), new RegExp(`Hi ${person.name} from ${person.neighborhood}!`));
 });
 
 test("UI smoke: settings changes round-trip to the backend", async () => {

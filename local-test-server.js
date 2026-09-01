@@ -24,6 +24,9 @@ const http = require("http");
 const fs = require("fs");
 const path = require("path");
 const Validation = require("./src/validation.js");
+const MatchingEngine = require("./src/matching-engine.js");
+const Regions = require("./src/regions.js");
+const NEIGHBORHOOD_COORDS = Regions.DISTRICT_COORDS;
 
 // ---------------------------------------------------------------------------
 // Argument parsing — detect mode from the first argument
@@ -110,14 +113,6 @@ function cellGet(row, hi, col) {
 // Fake geo/travel responses (deterministic, not random — same input → same
 // output across runs so test results are stable)
 // ---------------------------------------------------------------------------
-const NEIGHBORHOOD_COORDS = {
-  "Kallio": [60.1841, 24.9502],
-  "Töölö": [60.1756, 24.9145],
-  "Espoo keskus": [60.2052, 24.6522],
-  "Kamppi": [60.1687, 24.9316],
-  "Kruununhaka": [60.1710, 24.9580],
-  "Punavuori": [60.1620, 24.9350],
-};
 
 function stableHash(str) {
   let h = 0;
@@ -125,17 +120,49 @@ function stableHash(str) {
   return h;
 }
 
-function fakeGeocode(addresses) {
-  return addresses.map((addr) => {
-    const neighborhood = Object.keys(NEIGHBORHOOD_COORDS).find((n) => addr.includes(n));
-    const base = NEIGHBORHOOD_COORDS[neighborhood] || [60.1699, 24.9384];
-    const h = stableHash(addr);
-    return { address: addr, lat: base[0] + (((h % 1000) / 1000) - 0.5) * 0.01,
-             lon: base[1] + ((((h >> 10) % 1000) / 1000) - 0.5) * 0.02, _fake: true };
+// Mirrors the real geocoder's contract: entries are { street, neighbourhood },
+// results carry `precise`, and an unrecognised district is reported as
+// imprecise rather than quietly placed somewhere plausible.
+function fakeGeocode(entries) {
+  return entries.map((entry) => {
+    const rawStreet    = typeof entry === "string" ? entry.split(",")[0].trim() : (entry.street || "");
+    const neighborhood = typeof entry === "string"
+      ? (entry.split(",").map((p) => p.trim()).find((p) => Regions.resolveDistrict(p)) || "")
+      : (entry.neighborhood || "");
+    // Same sanitising and same tolerant district lookup as the real geocoder,
+    // so messy input behaves the same offline as it does in production.
+    const street = Regions.normalizeStreet(rawStreet) || rawStreet;
+    const anchor = Regions.resolveDistrict(neighborhood);
+    if (!anchor) {
+      return { street: rawStreet, neighborhood, queried: street, precise: false, error: "district not recognised" };
+    }
+    const h = stableHash(street + "|" + anchor.name);
+    return {
+      street: rawStreet,
+      neighborhood,
+      queried: street,
+      lat: anchor.coords[0] + (((h % 1000) / 1000) - 0.5) * 0.01,
+      lon: anchor.coords[1] + ((((h >> 10) % 1000) / 1000) - 0.5) * 0.02,
+      label: `${street}, ${anchor.name}`,
+      town: anchor.name,
+      confidence: 0.95,
+      precise: true,
+      _fake: true,
+    };
   });
 }
+// Distance- and mode-aware, unlike a flat hash: the match quality score is
+// dominated by travel time, so a stub that ignored geography made the whole
+// ranking meaningless when testing locally. Uses the engine's own estimate,
+// plus a small deterministic jitter so times aren't suspiciously exact.
 function fakeTravelTime(pairs) {
-  return pairs.map((p) => ({ id: p.id, minutes: 4 + (stableHash(p.id) % 12), _fake: true }));
+  return pairs.map((p) => {
+    const km = MatchingEngine.haversineKm([p.from.lat, p.from.lon], [p.to.lat, p.to.lon]);
+    const estimate = MatchingEngine.estimateTravelTime(km, p.mode);
+    if (!isFinite(estimate)) return { id: p.id, error: `Unknown transport mode '${p.mode}'` };
+    const jitter = ((stableHash(p.id) % 21) - 10) / 100; // ±10%
+    return { id: p.id, minutes: Math.max(1, estimate * (1 + jitter)), _fake: true };
+  });
 }
 function fakeIsochrone() {
   return { type: "FeatureCollection", features: [], _fake: true, note: "local test server stub" };

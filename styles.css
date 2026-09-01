@@ -209,6 +209,53 @@ button:hover { background: var(--surface-muted); }
   border-radius: 999px;
 }
 .badge-pending { background: var(--warning-bg); color: var(--warning-text); }
+.badge-score { background: var(--success-bg); color: var(--success-text); font-variant-numeric: tabular-nums; }
+
+.rank-badge {
+  display: inline-block;
+  min-width: 26px;
+  margin-right: 8px;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--surface-muted);
+  color: var(--text-secondary);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+
+.score-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin: 10px 0 4px;
+  padding: 10px 12px;
+  background: var(--surface-muted);
+  border-radius: 8px;
+}
+.score-row { display: grid; grid-template-columns: 74px 1fr 38px; align-items: center; gap: 10px; }
+.score-label {
+  font-size: 12px;
+  color: var(--text-secondary);
+  cursor: help;
+}
+.score-track {
+  height: 6px;
+  border-radius: 999px;
+  background: var(--border);
+  overflow: hidden;
+}
+.score-fill { display: block; height: 100%; border-radius: 999px; background: var(--accent); }
+/* Tinted per signal so a weak dimension is identifiable at a glance. */
+.score-fill-travel   { background: var(--accent); }
+.score-fill-age      { background: #5B6EC9; }
+.score-fill-language { background: #C1622D; }
+.score-value {
+  font-size: 12px;
+  color: var(--text-secondary);
+  text-align: right;
+  font-variant-numeric: tabular-nums;
+}
 .badge-muted { background: var(--surface-muted); color: var(--text-muted); }
 
 .card-actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
@@ -254,6 +301,15 @@ button:hover { background: var(--surface-muted); }
 .applicant-details[hidden] { display: none; }
 .applicant-details div { display: flex; flex-direction: column; }
 .applicant-details strong { color: var(--text); font-size: 12px; }
+
+.source-note {
+  font-size: 12.5px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}
+.source-note-ok   { background: var(--success-bg); color: var(--success-text); }
+.source-note-warn { background: var(--warning-bg); color: var(--warning-text); }
 
 .empty-state {
   color: var(--text-muted);

@@ -29,6 +29,46 @@ const MODE_MODEL = {
   B: { speedKmh: 15, overheadMin: 8 }, // Bicycle
 };
 
+// Fastest a mode could plausibly average over a straight line. Real routes are
+// longer than straight lines, so a journey implying more than this isn't a slow
+// day or a detour — it's a wrong number. Set generously against measured
+// Uusimaa journeys (commuter rail to Hyvinkää implies 69 km/h straight-line,
+// motorway driving 65) because the job is catching order-of-magnitude errors,
+// not shaving edge cases.
+const MODE_MAX_KMH = { W: 10, B: 40, D: 130, P: 120 };
+
+// How much slower than the speed model a real route may be before the number
+// stops looking like a journey. Generous: awkward transit with two transfers
+// legitimately runs 2-3x the model. An absolute time cap was tried first and
+// was the wrong tool — it rejected long-but-honest journeys, like walking
+// across Uusimaa, which are arithmetically fine and simply fail the travel
+// constraint later.
+const SLOWEST_PLAUSIBLE_FACTOR = 5;
+
+// A routed time is only worth more than an estimate if it's actually a
+// journey. This exists because a routing call can succeed — HTTP 200, no
+// errors — and still return something impossible: a unit mix-up, a truncated
+// value, a profile the router silently ignored. Those look identical to good
+// data downstream, and the travel-time provenance note counts any number as
+// "routed", so they have to be caught here.
+function travelTimePlausible(minutes, distanceKm, mode) {
+  if (typeof minutes !== 'number' || !isFinite(minutes) || minutes <= 0) return false;
+  if (!isFinite(distanceKm) || distanceKm <= 0) return true; // same address
+
+  // Too fast to be that mode — a car time returned for a walk, or minutes
+  // where seconds were meant.
+  const ceiling = MODE_MAX_KMH[mode];
+  if (ceiling && distanceKm / (minutes / 60) > ceiling) return false;
+
+  // Too slow to be a journey at all — seconds returned where minutes were
+  // meant. Measured against the speed model rather than the clock, so a mode's
+  // fixed overhead doesn't make short trips look wrong.
+  const expected = estimateTravelTime(distanceKm, mode);
+  if (isFinite(expected) && expected > 0 && minutes > expected * SLOWEST_PLAUSIBLE_FACTOR) return false;
+
+  return true;
+}
+
 function estimateTravelTime(distanceKm, mode) {
   const m = MODE_MODEL[mode];
   if (!m) return Infinity;
@@ -75,13 +115,94 @@ function groupAgeRangeLabel(members) {
   return earliest === latest ? earliest : `${earliest}\u2013${latest}`;
 }
 
-// Directional: each person must be able to reach the other using one of
-// their own transport modes, within their own max travel time. A shared
+// A group meets at a café or a park, not at each other's flats, so neither
+// person travels the full door-to-door distance — each covers roughly half of
+// it. Requiring the whole journey from both sides was halving the practical
+// radius and rejecting pairs that can comfortably meet: a mother willing to
+// walk 30 minutes and one willing to take a bus for 15 could only be paired
+// within 2km, when meeting midway puts them 4km apart.
+//
+// Fixed costs don't halve. You still walk to the stop and wait for the bus
+// whether you ride two stops or ten, so only the moving part is divided.
+function meetingLegMinutes(fullMinutes, mode) {
+  if (!isFinite(fullMinutes)) return fullMinutes;
+  const model    = MODE_MODEL[mode];
+  const overhead = model ? Math.min(model.overheadMin, fullMinutes) : 0;
+  return overhead + (fullMinutes - overhead) / 2;
+}
+
+// Directional: each person must be able to reach the meeting point using one
+// of their own transport modes, within their own max travel time. A shared
 // mode is not required.
 function pairwiseTravelOk(a, b, settings, travelTimeFn) {
-  const aCanTravel = a.transport.some((mode) => travelTimeFn(a, b, mode) <= a.maxTravel);
-  const bCanTravel = b.transport.some((mode) => travelTimeFn(b, a, mode) <= b.maxTravel);
+  const aCanTravel = a.transport.some((mode) => meetingLegMinutes(travelTimeFn(a, b, mode), mode) <= a.maxTravel);
+  const bCanTravel = b.transport.some((mode) => meetingLegMinutes(travelTimeFn(b, a, mode), mode) <= b.maxTravel);
   return aCanTravel && bCanTravel;
+}
+
+// ---------------------------------------------------------------------------
+// Group quality scoring
+//
+// fitsGroup answers "is this group allowed?" — a yes/no against the hard
+// constraints. scoreGroup answers "how good is it?", so that groups can be
+// grown best-first and presented strongest-first rather than in whatever
+// order the pool happened to be iterated.
+// ---------------------------------------------------------------------------
+
+// Travel dominates because a group that is awkward to reach won't actually
+// meet; age and language affect how well it gels once it does.
+const SCORE_WEIGHTS = { travel: 0.5, age: 0.3, language: 0.2 };
+
+function clamp01(n) {
+  if (!isFinite(n)) return 0;
+  return Math.min(1, Math.max(0, n));
+}
+
+// Scored on the worst pair rather than the average: a group is only as
+// reachable as its most burdened member. Each leg is measured against that
+// member's own stated limit, matching the directional rule in
+// pairwiseTravelOk.
+function travelScore(members, travelTimeFn) {
+  if (members.length < 2) return 1;
+  let worstRatio = 0;
+  for (const a of members) {
+    for (const b of members) {
+      if (a.id === b.id) continue;
+      if (!a.transport.length || !a.maxTravel) return 0;
+      // Same journey pairwiseTravelOk checks, so the score and the constraint
+      // can't disagree about how far someone is actually travelling.
+      const best = Math.min(...a.transport.map((mode) => meetingLegMinutes(travelTimeFn(a, b, mode), mode)));
+      worstRatio = Math.max(worstRatio, best / a.maxTravel);
+    }
+  }
+  return clamp01(1 - worstRatio);
+}
+
+// Rewards a tight age spread rather than merely staying under maxAgeGap.
+function ageScore(members, settings) {
+  if (!settings.maxAgeGap) return 1;
+  return clamp01(1 - ageRangeMonths(members) / settings.maxAgeGap);
+}
+
+// How much of the members' language repertoires is actually common ground.
+// 1.0 means every language the narrowest-speaking member has is shared by
+// the whole group, so nobody has to fall back to a second language.
+function languageScore(members) {
+  const narrowest = Math.min(...members.map((m) => m.language.length));
+  if (!narrowest) return 0;
+  return clamp01(languageIntersection(members).size / narrowest);
+}
+
+function scoreGroup(members, settings, travelTimeFn) {
+  const travel   = travelScore(members, travelTimeFn);
+  const age      = ageScore(members, settings);
+  const language = languageScore(members);
+  return {
+    travel,
+    age,
+    language,
+    total: SCORE_WEIGHTS.travel * travel + SCORE_WEIGHTS.age * age + SCORE_WEIGHTS.language * language,
+  };
 }
 
 function fitsGroup(candidate, group, settings, travelTimeFn) {
@@ -91,30 +212,81 @@ function fitsGroup(candidate, group, settings, travelTimeFn) {
   return true;
 }
 
-// Simple greedy clustering: walk through the pool (oldest baby first, for
-// determinism), grow each group while candidates still fit, stop at
-// maxGroupSize, keep the group only if it reached minGroupSize. This is a
-// heuristic, not an optimal solver — documented as a known simplification
-// in the design doc and README.
+// Greedy best-fit clustering: walk through the pool (oldest baby first, for
+// determinism) and grow each group by repeatedly adding whichever eligible
+// candidate produces the highest-scoring group. Stop at maxGroupSize, keep
+// the group only if it reached minGroupSize, and return groups strongest
+// first. Still a heuristic, not an optimal solver — seeds are claimed in
+// order, so an early group can take someone a later group needed more.
+// How many others each person could travel to meet. Someone reachable by only
+// two people has to be seeded before a well-connected person absorbs one of
+// them, or they end up unmatched through no fault of their own.
+function travelPartnerCounts(pool, settings, travelTimeFn) {
+  const counts = new Map(pool.map((p) => [p.id, 0]));
+  for (let i = 0; i < pool.length; i++) {
+    for (let j = i + 1; j < pool.length; j++) {
+      if (pairwiseTravelOk(pool[i], pool[j], settings, travelTimeFn)) {
+        counts.set(pool[i].id, counts.get(pool[i].id) + 1);
+        counts.set(pool[j].id, counts.get(pool[j].id) + 1);
+      }
+    }
+  }
+  return counts;
+}
+
 function clusterGroups(pool, settings, travelTimeFn) {
   const sorted = [...pool].sort((a, b) => new Date(a.dob) - new Date(b.dob));
+
+  // Seeds are taken most-constrained-first rather than in sheet or
+  // date-of-birth order. Sheet order is arbitrary, and it meant whoever
+  // happened to be near the top of the spreadsheet claimed the people that
+  // someone with fewer options needed. Candidates within a group are still
+  // considered in date-of-birth order, so ties break the same way every run.
+  const partnerCounts = travelPartnerCounts(pool, settings, travelTimeFn);
+  const seedOrder = [...sorted].sort(
+    (a, b) =>
+      partnerCounts.get(a.id) - partnerCounts.get(b.id) ||
+      new Date(a.dob) - new Date(b.dob) ||
+      String(a.id).localeCompare(String(b.id))
+  );
+
   const used = new Set();
   const groups = [];
 
-  for (const seed of sorted) {
+  for (const seed of seedOrder) {
     if (used.has(seed.id)) continue;
     const group = [seed];
-    for (const cand of sorted) {
-      if (cand.id === seed.id || used.has(cand.id)) continue;
-      if (group.length >= settings.maxGroupSize) break;
-      if (fitsGroup(cand, group, settings, travelTimeFn)) group.push(cand);
+
+    while (group.length < settings.maxGroupSize) {
+      let best = null;
+      let bestScore = -Infinity;
+      for (const cand of sorted) {
+        if (used.has(cand.id) || group.some((m) => m.id === cand.id)) continue;
+        if (!fitsGroup(cand, group, settings, travelTimeFn)) continue;
+        // Strict > keeps ties with the earlier candidate in `sorted`, so
+        // repeated runs over the same pool give the same groups.
+        const score = scoreGroup([...group, cand], settings, travelTimeFn).total;
+        if (score > bestScore) {
+          bestScore = score;
+          best = cand;
+        }
+      }
+      if (!best) break;
+      group.push(best);
     }
+
     if (group.length >= settings.minGroupSize) {
       group.forEach((m) => used.add(m.id));
       groups.push(group);
     }
   }
-  return groups;
+
+  // Strongest first, so the coordinator reviews the most convincing matches
+  // at the top of the list instead of in seed order.
+  return groups
+    .map((members) => ({ members, score: scoreGroup(members, settings, travelTimeFn).total }))
+    .sort((a, b) => b.score - a.score)
+    .map((g) => g.members);
 }
 
 // Ranked candidates from the unmatched pool who'd fit an existing group's
@@ -134,6 +306,9 @@ function findReplacementCandidates(existingMembers, pool, settings, travelTimeFn
 const MatchingEngine = {
   haversineKm,
   MODE_MODEL,
+  MODE_MAX_KMH,
+  SLOWEST_PLAUSIBLE_FACTOR,
+  travelTimePlausible,
   estimateTravelTime,
   sharedModes,
   monthsSinceEpoch,
@@ -143,6 +318,13 @@ const MatchingEngine = {
   formatMonthYear,
   groupAgeRangeLabel,
   pairwiseTravelOk,
+  meetingLegMinutes,
+  travelPartnerCounts,
+  SCORE_WEIGHTS,
+  travelScore,
+  ageScore,
+  languageScore,
+  scoreGroup,
   fitsGroup,
   clusterGroups,
   findReplacementCandidates,

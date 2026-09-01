@@ -59,7 +59,25 @@ function syncToBackend(action, payload) {
   });
 }
 
+// Not re-entrant on its own: the function replaces state.applicants and then
+// awaits geocoding, so a second concurrent call would swap the array out from
+// under the first and the geocode results would land on orphaned objects,
+// leaving everyone without coordinates. Concurrent callers share one load
+// instead — this happens for real when the organizer hits Sync while the
+// initial load is still running.
+let loadInFlight = null;
+
 async function loadFromBackend() {
+  if (loadInFlight) return loadInFlight;
+  loadInFlight = loadFromBackend_();
+  try {
+    return await loadInFlight;
+  } finally {
+    loadInFlight = null;
+  }
+}
+
+async function loadFromBackend_() {
   try {
     const [applicants, groups, templates, settings] = await Promise.all([
       callBackend('getApplicants', {}),
@@ -72,8 +90,14 @@ async function loadFromBackend() {
       const prev = prevById[a.id];
       return {
         ...a,
-        coords:       prev?.geocodedReal ? prev.coords : [60.1699 + (Math.random() - 0.5) * 0.05, 24.9384 + (Math.random() - 0.5) * 0.1],
-        geocodedReal: prev?.geocodedReal || false,
+        // No coordinate until geocoding produces one. Inventing a random
+        // point near Helsinki (which this used to do) doesn't just misplace a
+        // pin — it fabricates distances that the matching engine then treats
+        // as real.
+        coords:        prev?.geocodedReal ? prev.coords : null,
+        geocodedReal:  prev?.geocodedReal || false,
+        geocodeLabel:  prev?.geocodeLabel || null,
+        geocodeIssue:  prev?.geocodedReal ? null : 'Address not geocoded yet',
       };
     });
     await ensureGeocoded(state.applicants);
@@ -112,15 +136,22 @@ const state = {
   overlapVisibleFor: null,
   nextGroupNum:      1,
   usingBackendData:  false,
+  travelTimeStats: null,
+  travelTimeError: null,
+  travelTimeRejected: 0,
 };
 
 // ---------------------------------------------------------------------------
 // Travel time: cache + backend, falling back to MatchingEngine estimates
 // ---------------------------------------------------------------------------
 
+// Directional. Transit A->B and B->A genuinely differ, and the matching model
+// compares each person's own journey against their own limit, so collapsing
+// the two into one slot threw away half the data — computeCandidateGroups
+// already requests both directions, so a sorted key meant the second result
+// simply overwrote the first.
 function travelCacheKey(idA, idB, mode) {
-  const [x, y] = [idA, idB].sort();
-  return `travel:${x}:${y}:${mode}`;
+  return `travel:${idA}>${idB}:${mode}`;
 }
 
 function getTravelMinutes(a, b, mode) {
@@ -148,18 +179,32 @@ async function ensureGeocoded(applicants) {
   if (toFetch.length === 0) return;
 
   try {
-    const addresses = toFetch.map((a) => `${a.street}, ${a.neighborhood}, Finland`);
+    // Structured, so the backend can anchor the search to the district rather
+    // than hoping the geocoder respects a municipality buried in free text.
+    const addresses = toFetch.map((a) => ({ street: a.street, neighborhood: a.neighborhood }));
     const results   = await callBackend('geocode', { addresses });
     results.forEach((r, i) => {
       const a = toFetch[i];
-      if (typeof r.lat === 'number') {
-        a.coords      = [r.lat, r.lon];
+      a.geocodeLabel = r.label || null;
+      if (typeof r.lat === 'number' && r.precise) {
+        a.coords       = [r.lat, r.lon];
         a.geocodedReal = true;
+        a.geocodeIssue = null;
         cacheSet('geocode:' + a.street + ', ' + a.neighborhood, r);
+      } else {
+        // Either nothing was found, or the geocoder only managed to place the
+        // address at street/city level. Say which, so the organizer can fix
+        // the row instead of wondering why the pin is in the wrong place.
+        a.coords       = null;
+        a.geocodedReal = false;
+        a.geocodeIssue = r.error
+          ? `Address not found: ${r.error}`
+          : `Address only matched loosely${r.label ? ` (got "${r.label}")` : ''} — needs a more exact street address`;
       }
     });
   } catch (err) {
-    console.warn('Geocoding failed, using approximate coordinates:', err.message);
+    console.warn('Geocoding call failed:', err.message);
+    toFetch.forEach((a) => { a.geocodeIssue = `Geocoding unavailable: ${err.message}`; });
   }
 }
 
@@ -176,13 +221,35 @@ async function ensureTravelTimes(pairsNeeded) {
     }));
   if (toFetch.length === 0) return;
 
+  const requested = new Map(toFetch.map((p) => [p.id, p]));
+
   try {
     const results = await callBackend('travelTime', { pairs: toFetch });
     results.forEach((r) => {
-      if (typeof r.minutes === 'number') cacheSet(r.id, { minutes: r.minutes });
+      if (typeof r.minutes !== 'number') {
+        if (r.error && !state.travelTimeError) state.travelTimeError = r.error;
+        return;
+      }
+      // A successful call can still return an impossible number. Caching one
+      // is worse than falling back to an estimate, because it would be counted
+      // and displayed as a real routed journey.
+      const pair = requested.get(r.id);
+      const km   = pair
+        ? MatchingEngine.haversineKm([pair.from.lat, pair.from.lon], [pair.to.lat, pair.to.lon])
+        : NaN;
+      if (pair && !MatchingEngine.travelTimePlausible(r.minutes, km, pair.mode)) {
+        state.travelTimeRejected = (state.travelTimeRejected || 0) + 1;
+        if (!state.travelTimeError) {
+          state.travelTimeError =
+            `implausible routed time (${r.minutes.toFixed(0)} min for ${km.toFixed(1)} km by ${pair.mode})`;
+        }
+        return;
+      }
+      cacheSet(r.id, { minutes: r.minutes });
     });
   } catch (err) {
     console.warn('Travel-time backend call failed, falling back to estimates:', err.message);
+    state.travelTimeError = err.message;
   }
 }
 
@@ -191,10 +258,13 @@ async function ensureTravelTimes(pairsNeeded) {
 // ---------------------------------------------------------------------------
 
 async function computeCandidateGroups() {
+  // geocodedReal is a hard requirement: without a real coordinate there is no
+  // honest travel time, and matching on a guess is worse than not matching.
   const pool = state.applicants.filter(
     (a) =>
       a.matchStatus === 'unmatched' &&
       a.eligibleForMatching &&
+      a.geocodedReal &&
       (state.settings.neighborhoodFilter === 'all' || a.neighborhood === state.settings.neighborhoodFilter)
   );
 
@@ -203,26 +273,47 @@ async function computeCandidateGroups() {
     for (let j = i + 1; j < pool.length; j++) {
       const a = pool[i], b = pool[j];
       const distanceKm = MatchingEngine.haversineKm(a.coords, b.coords);
-      const modesA = a.transport.filter((mode) => {
+      // Rough reachability, only to decide which pairs are worth a routing
+      // call. Each person covers about half the door-to-door distance to reach
+      // the meeting point, minus the fixed overhead of their mode, and the 1.5
+      // factor allows for roads not running straight.
+      const reachable = (person, mode) => {
         const model = MatchingEngine.MODE_MODEL[mode];
-        return model && distanceKm <= (a.maxTravel / 60) * model.speedKmh * 1.5;
-      });
-      const modesB = b.transport.filter((mode) => {
-        const model = MatchingEngine.MODE_MODEL[mode];
-        return model && distanceKm <= (b.maxTravel / 60) * model.speedKmh * 1.5;
-      });
+        if (!model) return false;
+        const movingMin = Math.max(0, person.maxTravel - model.overheadMin);
+        return distanceKm <= 2 * (movingMin / 60) * model.speedKmh * 1.5;
+      };
+      const modesA = a.transport.filter((mode) => reachable(a, mode));
+      const modesB = b.transport.filter((mode) => reachable(b, mode));
       if (modesA.length === 0 || modesB.length === 0) continue;
       modesA.forEach((mode) => pairsNeeded.push({ a, b, mode }));
       modesB.forEach((mode) => pairsNeeded.push({ a: b, b: a, mode }));
     }
   }
+  state.travelTimeError = null;
+  state.travelTimeRejected = 0;
   await ensureTravelTimes(pairsNeeded);
 
+  // Lisa asked whether the tool really checks public transport times. It does,
+  // but any routing failure degrades silently to a straight-line speed
+  // estimate, which is indistinguishable in the output — so count which is
+  // which and say so.
+  const routed = pairsNeeded.filter(({ a, b, mode }) => cacheGet(travelCacheKey(a.id, b.id, mode))).length;
+  state.travelTimeStats = {
+    total: pairsNeeded.length,
+    routed,
+    estimated: pairsNeeded.length - routed,
+    rejected: state.travelTimeRejected || 0,
+  };
+
+  // clusterGroups already returns strongest-first; the score is recomputed
+  // here for display rather than widening its return type.
   const groups = MatchingEngine.clusterGroups(pool, state.settings, getTravelMinutes);
   return groups.map((group, i) => ({
     candidateId: 'cand-' + i,
     memberIds:   group.map((m) => m.id),
     name:        `${MatchingEngine.mostCommonNeighborhood(group)} · ${MatchingEngine.groupAgeRangeLabel(group)} · ${group.length} moms`,
+    score:       MatchingEngine.scoreGroup(group, state.settings, getTravelMinutes),
   }));
 }
 
@@ -339,7 +430,7 @@ function applicantCandidateColor(applicantId) {
 function renderMap() {
   pinLayer.clearLayers();
   state.applicants
-    .filter((a) => !a.hasDataIssues)
+    .filter((a) => !a.hasDataIssues && a.geocodedReal && a.coords)
     .forEach((a) => {
       const groupColor = colorForGroup(a.matchGroupId) || applicantCandidateColor(a.id);
       const isMatched  = !!groupColor;
@@ -395,26 +486,86 @@ async function drawOverlap(candidateId) {
   });
 }
 
-const FLAG_MAP = { English: '🇬🇧', Finnish: '🇫🇮', Swedish: '🇸🇪', Russian: '🇷🇺', Arabic: '🇸🇦', French: '🇫🇷', Swahili: '🇰🇪' };
 const MODE_ICON = { W: '🚶', D: '🚙', P: '🚌', B: '🚲' };
+
+const SCORE_LABELS = {
+  travel:   'Travel',
+  age:      'Baby age',
+  language: 'Language',
+};
+
+const SCORE_HINTS = {
+  travel:   "Worst single journey in the group, against that member's own travel limit",
+  age:      'How tightly the babies cluster in age, against the configured max age gap',
+  language: 'How much of the members\u2019 shared languages is common to everyone',
+};
+
+function pct(n) {
+  return Math.round(n * 100);
+}
+
+// The score breakdown is shown so the coordinator can see why a group ranked
+// where it did — a weak group with one bad dimension reads very differently
+// from one that is mediocre across the board.
+function scorePanel(score) {
+  if (!score) return '';
+  const bar = (key) => {
+    const value = pct(score[key]);
+    const weight = MatchingEngine.SCORE_WEIGHTS[key];
+    return `
+      <div class="score-row">
+        <span class="score-label" title="${escHtml(SCORE_HINTS[key])}">${escHtml(SCORE_LABELS[key])}</span>
+        <span class="score-track" role="img" aria-label="${escHtml(SCORE_LABELS[key])}: ${value} percent, weighted ${weight}">
+          <span class="score-fill score-fill-${escHtml(key)}" style="width:${value}%"></span>
+        </span>
+        <span class="score-value">${value}%</span>
+      </div>`;
+  };
+  return `
+    <div class="score-panel">
+      ${['travel', 'age', 'language'].map(bar).join('')}
+    </div>`;
+}
+
+// Says plainly where the travel times came from. Without this a run against a
+// dead routing API looks exactly like a healthy one.
+function travelSourceNote() {
+  const s = state.travelTimeStats;
+  if (!s || !s.total) return '';
+  if (s.estimated === 0 && !s.rejected) {
+    return `<div class="source-note source-note-ok">Travel times: all ${s.routed} journeys routed via HSL/Digitransit.</div>`;
+  }
+  const pct = Math.round((s.estimated / s.total) * 100);
+  // Rejected journeys are called out separately: a routing service returning
+  // impossible numbers is a different problem from one being unreachable.
+  const bad = s.rejected
+    ? ` ${s.rejected} routed ${s.rejected === 1 ? 'journey was' : 'journeys were'} discarded as impossible for the distance.`
+    : '';
+  const why = state.travelTimeError ? ` Last problem: ${escHtml(state.travelTimeError)}` : '';
+  return `<div class="source-note source-note-warn">Travel times: ${s.routed} of ${s.total} journeys routed via HSL/Digitransit; ${s.estimated} (${pct}%) fell back to straight-line estimates, which are less accurate.${bad}${why}</div>`;
+}
 
 function renderCandidateCards() {
   const container = document.getElementById('candidateCards');
-  container.innerHTML = '';
+  container.innerHTML = travelSourceNote();
   if (state.candidateGroups.length === 0) {
-    container.innerHTML = `<div class="empty-state">No candidate groups yet. Adjust the filters above and click "Run matching."</div>`;
+    container.innerHTML += `<div class="empty-state">No candidate groups yet. Adjust the filters above and click "Run matching."</div>`;
     return;
   }
-  state.candidateGroups.forEach((candidateGroup) => {
+  state.candidateGroups.forEach((candidateGroup, rank) => {
     const members = candidateGroup.memberIds.map(getApplicant);
     const color   = candidateColor(candidateGroup.candidateId);
+    const score   = candidateGroup.score;
     const card    = document.createElement('div');
     card.className = 'card';
     card.innerHTML = `
       <div class="card-header">
-        <span class="card-title">${escHtml(candidateGroup.name)}</span>
-        <span class="badge badge-pending">pending</span>
+        <span class="card-title"><span class="rank-badge">#${rank + 1}</span>${escHtml(candidateGroup.name)}</span>
+        ${score
+          ? `<span class="badge badge-score" title="Weighted match score — higher is a stronger group">${pct(score.total)}% match</span>`
+          : `<span class="badge badge-pending">pending</span>`}
       </div>
+      ${scorePanel(score)}
       <div class="mini-card-list">${members.map((m) => applicantCard(m, color)).join('')}</div>
       <div class="card-actions">
         <button data-action="approve" data-id="${escHtml(candidateGroup.candidateId)}">Approve</button>
@@ -479,7 +630,7 @@ function applicantCard(a, mapColor) {
       <div class="unmatched-summary">
         <span class="participant-id-wrap">${mapDot}<button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.id)}</button></span>
         <span>${escHtml(a.name)} · ${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span>
-        <span>${escHtml(a.coords)}</span>
+        <span>${a.geocodedReal && a.coords ? escHtml(a.coords) : '<em>no location</em>'}</span>
       </div>
       <div class="applicant-details" hidden>
         ${detailRow('Name', a.name)}
@@ -560,9 +711,14 @@ function renderActiveGroups() {
 
 function renderDataIssues() {
   const container = document.getElementById('dataIssuesList');
-  const flagged   = state.applicants.filter((a) => a.hasDataIssues);
+  // A row can be perfectly valid in the sheet but still un-geocodable, and
+  // that keeps it out of matching just as effectively, so both belong here.
+  const flagged = state.applicants
+    .map((a) => ({ a, issues: [...(a.hasDataIssues ? a.dataIssues : []), ...(a.geocodeIssue ? [a.geocodeIssue] : [])] }))
+    .filter((r) => r.issues.length > 0);
+
   container.innerHTML = flagged.length
-    ? flagged.map((a) => `<div class="mini-card issue-card"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}) — ${a.dataIssues.map(escHtml).join('; ')}</span></div>`).join('')
+    ? flagged.map(({ a, issues }) => `<div class="mini-card issue-card"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}) — ${issues.map(escHtml).join('; ')}</span></div>`).join('')
     : `<div class="empty-state">No data issues found in the current sheet.</div>`;
 }
 

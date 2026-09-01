@@ -18,6 +18,7 @@
 const { google } = require('googleapis');
 const fs         = require('fs');
 const Validation = require('../../src/validation.js');
+const Regions    = require('../../src/regions.js');
 
 // ---------------------------------------------------------------------------
 // Module-level cache — warm Lambda instances reuse the Sheets client and
@@ -373,37 +374,108 @@ async function sheetSaveSettings(settings) {
 // ---------------------------------------------------------------------------
 // Geocoding — Digitransit Pelias API
 // ---------------------------------------------------------------------------
-async function geocodeBatch(addresses) {
+// Digitransit's geocoder discards the municipality in a free-text query and
+// fuzzy-matches the street name across all of Finland — "Jokikatu 11, Porvoo"
+// comes back as Jokikatu 11 in Joensuu, 400km away, at 0.96 confidence. So the
+// confidence score is useless for catching this; what makes a result
+// trustworthy is anchoring the search to the district and then checking the hit
+// really landed there. Measured on 12 sample addresses: 9/9 correct anchored
+// per district, 7/12 with a single region-wide anchor.
+async function geocodeBatch(entries) {
   const key = process.env.DIGITRANSIT_API_KEY;
   if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
 
-  return Promise.all(addresses.map(async (addr) => {
+  return Promise.all(entries.map(async (entry) => {
+    const rawStreet    = typeof entry === 'string' ? entry : (entry.street || '');
+    const neighborhood = typeof entry === 'string' ? ''    : (entry.neighborhood || '');
+
+    // The sheet is hand-filled, so the cell may carry an apartment number, a
+    // stair, a postal code or a care-of line. None of that helps the geocoder
+    // and some of it makes it miss entirely, so the query uses a cleaned
+    // street while the response reports the original.
+    const street  = Regions.normalizeStreet(rawStreet) || rawStreet;
+    const anchor  = Regions.resolveDistrict(neighborhood);
+    const centre  = anchor ? anchor.coords : null;
+    const base    = { street: rawStreet, neighborhood, queried: street };
+
+    const params = new URLSearchParams({
+      text:               [street, anchor ? anchor.name : neighborhood, 'Finland'].filter(Boolean).join(', '),
+      size:               '5',
+      layers:             'address',
+      'boundary.country': 'FIN',
+    });
+    if (centre) {
+      params.set('focus.point.lat', String(centre[0]));
+      params.set('focus.point.lon', String(centre[1]));
+      params.set('boundary.circle.lat', String(centre[0]));
+      params.set('boundary.circle.lon', String(centre[1]));
+      params.set('boundary.circle.radius', String(anchor.radiusKm));
+    } else {
+      const b = Regions.REGION_BOUNDS;
+      params.set('focus.point.lat', String(Regions.REGION_CENTRE[0]));
+      params.set('focus.point.lon', String(Regions.REGION_CENTRE[1]));
+      params.set('boundary.rect.min_lat', String(b.minLat));
+      params.set('boundary.rect.max_lat', String(b.maxLat));
+      params.set('boundary.rect.min_lon', String(b.minLon));
+      params.set('boundary.rect.max_lon', String(b.maxLon));
+    }
+
     try {
-      const url  = `https://api.digitransit.fi/geocoding/v1/search?text=${encodeURIComponent(addr)}&size=1&boundary.country=FIN`;
-      const resp = await fetch(url, { headers: { 'digitransit-subscription-key': key } });
+      const resp = await fetch(`https://api.digitransit.fi/geocoding/v1/search?${params}`, {
+        headers: { 'digitransit-subscription-key': key },
+      });
+      if (!resp.ok) {
+        return { ...base, precise: false, error: `geocoder returned HTTP ${resp.status}` };
+      }
       const data = await resp.json();
-      const feat = data.features && data.features[0];
-      if (!feat) return { address: addr, error: 'not found' };
+      const feat = (data.features || [])[0];
+      if (!feat) return { ...base, precise: false, error: 'no matching street address found' };
+
       const [lon, lat] = feat.geometry.coordinates;
-      return { address: addr, lat, lon };
+      const label = feat.properties.label || null;
+      const town  = feat.properties.localadmin || feat.properties.locality || null;
+
+      // With a known district, check the hit is actually near it. Without one,
+      // the best available check is that the returned municipality matches
+      // what the organizer typed.
+      const inArea = anchor
+        ? Regions.withinAnchor(anchor, [lat, lon])
+        : !!(town && neighborhood && town.trim().toLowerCase() === neighborhood.trim().toLowerCase());
+      const sameStreet = Regions.streetNameMatches(street, label);
+      const precise    = inArea && sameStreet;
+
+      return {
+        ...base, lat, lon, label, town,
+        confidence: feat.properties.confidence,
+        precise,
+        error: precise ? undefined
+          : !inArea
+            ? `matched "${label || 'unknown'}"${town ? ` in ${town}` : ''}, which does not look like ${neighborhood || 'the given area'}`
+            : `no such street here — closest match was "${label || 'unknown'}"${street !== rawStreet ? ` (searched for "${street}")` : ''}`,
+      };
     } catch (err) {
-      return { address: addr, error: err.message };
+      return { ...base, precise: false, error: err.message };
     }
   }));
 }
 
 // ---------------------------------------------------------------------------
-// Travel time — OSRM (walk/bike/drive) + Digitransit Routing API (transit)
+// Travel time — Digitransit Routing API for every mode.
 //
 // Modes are the single-letter codes produced by Validation.parseTransport:
 // W walk, D drive, P public transport, B bicycle.
 // ---------------------------------------------------------------------------
-const OSRM_PROFILE = { W: 'foot', B: 'bike', D: 'car' };
+// Digitransit's own mode names. Everything routes through Digitransit now,
+// including walking and cycling — see directMinutes for why.
+const DIRECT_MODE = { W: 'WALK', B: 'BICYCLE', D: 'CAR' };
 
 async function travelTimeBatch(pairs) {
+  const departure = representativeDeparture();
   return Promise.all(pairs.map(async (p) => {
     try {
-      const minutes = p.mode === 'P' ? await transitMinutes(p.from, p.to) : await osrmMinutes(p.from, p.to, p.mode);
+      const minutes = p.mode === 'P'
+        ? await transitMinutes(p.from, p.to, departure)
+        : await directMinutes(p.from, p.to, p.mode, departure);
       return { id: p.id, minutes };
     } catch (err) {
       return { id: p.id, error: err.message };
@@ -411,28 +483,97 @@ async function travelTimeBatch(pairs) {
   }));
 }
 
-async function osrmMinutes(from, to, mode) {
-  const profile = OSRM_PROFILE[mode] || 'car';
-  const url     = `https://router.project-osrm.org/route/v1/${profile}/${from.lon},${from.lat};${to.lon},${to.lat}?overview=false`;
-  const resp    = await fetch(url);
-  const data    = await resp.json();
-  if (!data.routes || !data.routes.length) throw new Error('No OSRM route found');
-  return data.routes[0].duration / 60;
-}
-
-async function transitMinutes(from, to) {
+// Walking, cycling and driving, all from Digitransit rather than OSRM.
+//
+// The public OSRM demo server this used to call returns byte-identical results
+// for its foot, bike and car profiles — it routes everything as a car. A 2.9km
+// walk came back as 6.7 minutes (26 km/h) instead of roughly 40, so walkers
+// were being matched as though they drove. Digitransit answers the same trip
+// as WALK 42.1 min (4.0 km/h), BICYCLE 13.3 and CAR 6.0, which is the whole
+// point of asking per mode. It is also the API the transit path already uses,
+// so this drops a second provider and a dependency on a demo server that isn't
+// meant for production traffic.
+async function directMinutes(from, to, mode, departure = representativeDeparture()) {
   const key = process.env.DIGITRANSIT_API_KEY;
   if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
 
-  // NOTE: Digitransit GraphQL routing — tested against v2 Finland router.
-  // If this returns errors, check the Digitransit GraphiQL explorer at
-  // https://api.digitransit.fi/graphiql/finland/v2 for schema changes.
-  const query = `{ plan(
-    from: { lat: ${from.lat}, lon: ${from.lon} },
-    to: { lat: ${to.lat}, lon: ${to.lon} },
-    numItineraries: 1,
-    transportModes: [{ mode: WALK }, { mode: BUS }, { mode: RAIL }, { mode: TRAM }, { mode: SUBWAY }]
-  ) { itineraries { duration } } }`;
+  const directMode = DIRECT_MODE[mode];
+  if (!directMode) throw new Error(`Unknown transport mode '${mode}'`);
+
+  const query = `{ planConnection(
+    origin:      { location: { coordinate: { latitude: ${from.lat}, longitude: ${from.lon} } } },
+    destination: { location: { coordinate: { latitude: ${to.lat}, longitude: ${to.lon} } } },
+    dateTime:    { earliestDeparture: "${departure}" },
+    modes:       { directOnly: true, direct: [${directMode}] },
+    first: 1
+  ) { edges { node { duration } } } }`;
+
+  const resp = await fetch('https://api.digitransit.fi/routing/v2/finland/gtfs/v1', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'digitransit-subscription-key': key },
+    body: JSON.stringify({ query }),
+  });
+  if (!resp.ok) throw new Error(`Digitransit routing returned HTTP ${resp.status}`);
+
+  const data = await resp.json();
+  if (data.errors?.length) throw new Error(`Digitransit routing: ${data.errors[0].message}`);
+
+  const node = data.data?.planConnection?.edges?.[0]?.node;
+  if (!node) throw new Error(`No ${directMode.toLowerCase()} route found`);
+  // Direct modes leave immediately, so there is no boarding wait to add.
+  return node.duration / 60;
+}
+
+// Transit times must be reproducible, so they're asked for at a fixed
+// representative moment rather than "now" — otherwise the answer depends on
+// what time of day the organizer happens to run matching. A weekday mid-
+// morning is when these groups actually meet.
+//
+// Deliberately not cached across calls. server.js is a long-lived process, so
+// a value cached at startup drifts into the past, and the router answers a
+// stale date with a plausible-looking but wrong duration: HTTP 200, no GraphQL
+// errors, no real service found. That is indistinguishable from a healthy
+// answer downstream, which is the exact failure mode this file is trying to
+// eliminate. Computed once per batch instead, so every pair in a run still
+// shares one reference moment.
+function representativeDeparture() {
+  const parts = (date) =>
+    new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'Europe/Helsinki',
+      year: 'numeric', month: '2-digit', day: '2-digit', weekday: 'short',
+    }).formatToParts(date).reduce((acc, p) => ({ ...acc, [p.type]: p.value }), {});
+
+  // Next Monday-to-Friday, starting from tomorrow so it's always in the future.
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + 1);
+  for (let i = 0; i < 7 && ['Sat', 'Sun'].includes(parts(d).weekday); i++) {
+    d.setUTCDate(d.getUTCDate() + 1);
+  }
+  const { year, month, day } = parts(d);
+
+  // Helsinki is +03:00 in summer and +02:00 in winter, so the offset has to be
+  // read for that specific date rather than hardcoded.
+  const offset = new Intl.DateTimeFormat('en-US', {
+    timeZone: 'Europe/Helsinki', timeZoneName: 'longOffset',
+  }).formatToParts(d).find((p) => p.type === 'timeZoneName').value.replace('GMT', '') || '+00:00';
+
+  return `${year}-${month}-${day}T10:00:00${offset}`;
+}
+
+async function transitMinutes(from, to, departure = representativeDeparture()) {
+  const key = process.env.DIGITRANSIT_API_KEY;
+  if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
+
+  // planConnection is the scheduled OTP2 API — it consults timetables, unlike
+  // the older `plan` field which returned the same duration at 03:00 as at
+  // 10:00. Verified against the live router: requesting 03:00 pushes `start`
+  // to when first service actually runs.
+  const query = `{ planConnection(
+    origin:      { location: { coordinate: { latitude: ${from.lat}, longitude: ${from.lon} } } },
+    destination: { location: { coordinate: { latitude: ${to.lat}, longitude: ${to.lon} } } },
+    dateTime:    { earliestDeparture: "${departure}" },
+    first: 1
+  ) { edges { node { duration start } } } }`;
 
   const resp = await fetch('https://api.digitransit.fi/routing/v2/finland/gtfs/v1', {
     method: 'POST',
@@ -442,10 +583,22 @@ async function transitMinutes(from, to) {
     },
     body: JSON.stringify({ query }),
   });
-  const data         = await resp.json();
-  const itineraries  = data.data?.plan?.itineraries;
-  if (!itineraries?.length) throw new Error('No transit itinerary found');
-  return itineraries[0].duration / 60;
+  if (!resp.ok) throw new Error(`Digitransit routing returned HTTP ${resp.status}`);
+
+  const data = await resp.json();
+  // GraphQL reports schema and validation problems in `errors` with HTTP 200.
+  // These went unchecked before, so a renamed field surfaced as the misleading
+  // "No transit itinerary found".
+  if (data.errors?.length) throw new Error(`Digitransit routing: ${data.errors[0].message}`);
+
+  const node = data.data?.planConnection?.edges?.[0]?.node;
+  if (!node) throw new Error('No transit itinerary found');
+
+  // `duration` covers start-to-end only. Waiting for the first departure is
+  // the difference between when we asked to leave and when the itinerary
+  // begins, and it's part of the journey as far as the traveller is concerned.
+  const waitMs = Math.max(0, new Date(node.start).getTime() - new Date(departure).getTime());
+  return node.duration / 60 + waitMs / 60000;
 }
 
 // ---------------------------------------------------------------------------
@@ -476,8 +629,16 @@ async function isochroneReq(locations, mode, minutes) {
 // ---------------------------------------------------------------------------
 // Action dispatch
 // ---------------------------------------------------------------------------
+// Enough to follow what the frontend asked for, without dumping payloads. The
+// previous full-body log buried the terminal under 150-entry geocode batches
+// and printed applicant fields on every update.
+function describeRequest(body) {
+  const size = body.addresses?.length ?? body.pairs?.length ?? body.locations?.length;
+  return `${body.action}${size !== undefined ? ` (${size})` : ''}${body.id ? ` id=${body.id}` : ''}`;
+}
+
 async function dispatch(body) {
-  console.log(JSON.stringify(body));
+  console.log(`[api] ${describeRequest(body)}`);
   switch (body.action) {
     case 'ping':
       await ensureReady();
@@ -504,6 +665,10 @@ async function dispatch(body) {
 // ---------------------------------------------------------------------------
 // Netlify handler
 // ---------------------------------------------------------------------------
+// Exported for tests: the freshness of this value is load-bearing, since the
+// router answers a past date with a plausible but wrong duration.
+exports.representativeDeparture = representativeDeparture;
+
 exports.handler = async (event) => {
   const json = (statusCode, payload) => ({
     statusCode,

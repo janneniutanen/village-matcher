@@ -4,7 +4,7 @@
   "private": true,
   "description": "Support-group matching tool for new mothers in Helsinki",
   "scripts": {
-    "test": "node --test tests/matching-engine.test.js tests/validation.test.js",
+    "test": "node --test tests/matching-engine.test.js tests/validation.test.js tests/regions.test.js tests/e2e.test.js",
     "test:ui": "node --test tests/ui-smoke.test.js",
     "serve": "node local-test-server.js"
   },
