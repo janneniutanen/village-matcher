@@ -109,12 +109,54 @@ function parseDob(raw) {
   return d;
 }
 
+// Nobody is realistically travelling more than three hours to a peer-support
+// meetup, so anything above this is treated as a typo rather than an answer.
+const MAX_TRAVEL_MINUTES = 180;
+
+// Reads a duration out of free text and returns whole minutes, or null if
+// there's no number to work with. The field is free-form in the form, so it
+// sees "20", "about 20 min", "1,5 hours", "2 hours" and "1 h 30" alike.
+//
+// Both decimal separators are accepted because the sheet gets both: Finnish
+// locale writes 1,5 and an English-locale browser writes 1.5.
+function travelTextToMinutes(text) {
+  const s = String(text).toLowerCase().replace(/,(\d)/g, ".$1");
+  const HOURS   = /(\d+(?:\.\d+)?)\s*(?:hours?|hrs?|h)(?![a-z])/;
+  const MINUTES = /(\d+(?:\.\d+)?)\s*(?:minutes?|mins?|m)(?![a-z])/;
+
+  const hours = s.match(HOURS);
+  if (hours) {
+    let minutes = parseFloat(hours[1]) * 60;
+    const rest = s.slice(hours.index + hours[0].length);
+    const tail = rest.match(MINUTES) || rest.match(/^\D*(\d+(?:\.\d+)?)/);
+    if (tail) minutes += parseFloat(tail[1]);
+    return minutes;
+  }
+
+  const mins = s.match(MINUTES);
+  if (mins) return parseFloat(mins[1]);
+
+  const bare = s.match(/-?\d+(?:\.\d+)?/);
+  return bare ? parseFloat(bare[0]) : null;
+}
+
 function parseMaxTravel(raw) {
-  if (typeof raw === "string" && raw.includes("Doesn't matter")) return 180;
-  const n = typeof raw === "number" ? raw : parseFloat(String(raw).replaceAll(/[^\d]/g, ''));
-  if (!isFinite(n) || n <= 0 || n > 180) return null;
-  if (typeof raw === "string" && raw.toLowerCase().includes("hour")) return n * 60;
-  return n;
+  if (raw === null || raw === undefined) return null;
+
+  let minutes;
+  if (typeof raw === "number") {
+    minutes = raw;
+  } else {
+    const s = String(raw).trim();
+    if (s === "") return null;
+    if (s.includes("Doesn't matter")) return MAX_TRAVEL_MINUTES;
+    minutes = travelTextToMinutes(s);
+  }
+
+  // The range check has to come after the unit conversion, or an answer like
+  // "4 hours" slips through as 240.
+  if (minutes === null || !isFinite(minutes) || minutes <= 0 || minutes > MAX_TRAVEL_MINUTES) return null;
+  return Math.round(minutes);
 }
 
 function parseNonEmptyString(raw) {
@@ -204,6 +246,8 @@ const Validation = {
   parseLanguages,
   parseDob,
   parseMaxTravel,
+  travelTextToMinutes,
+  MAX_TRAVEL_MINUTES,
   parseNonEmptyString,
   invalidValue,
   normalizeApplicant,
