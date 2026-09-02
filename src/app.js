@@ -98,6 +98,9 @@ async function loadFromBackend_() {
         geocodedReal:  prev?.geocodedReal || false,
         geocodeLabel:  prev?.geocodeLabel || null,
         geocodeIssue:  prev?.geocodedReal ? null : 'Address not geocoded yet',
+        // A placed-but-imperfect match: right street and city, nearest known
+        // house number. Usable for matching, still worth the organizer seeing.
+        geocodeWarning: prev?.geocodeWarning || null,
       };
     });
     await ensureGeocoded(state.applicants);
@@ -170,8 +173,11 @@ async function ensureGeocoded(applicants) {
     const cacheKey = 'geocode:' + a.street + ', ' + a.neighborhood;
     const cached   = cacheGet(cacheKey);
     if (cached && typeof cached.lat === 'number') {
-      a.coords      = [cached.lat, cached.lon];
-      a.geocodedReal = true;
+      a.coords         = [cached.lat, cached.lon];
+      a.geocodedReal   = true;
+      a.geocodeLabel   = cached.label || null;
+      a.geocodeIssue   = null;
+      a.geocodeWarning = cached.warning || null;
     } else {
       toFetch.push(a);
     }
@@ -187,17 +193,19 @@ async function ensureGeocoded(applicants) {
       const a = toFetch[i];
       a.geocodeLabel = r.label || null;
       if (typeof r.lat === 'number' && r.precise) {
-        a.coords       = [r.lat, r.lon];
-        a.geocodedReal = true;
-        a.geocodeIssue = null;
+        a.coords         = [r.lat, r.lon];
+        a.geocodedReal   = true;
+        a.geocodeIssue   = null;
+        a.geocodeWarning = r.warning || null;
         cacheSet('geocode:' + a.street + ', ' + a.neighborhood, r);
       } else {
         // Either nothing was found, or the geocoder only managed to place the
         // address at street/city level. Say which, so the organizer can fix
         // the row instead of wondering why the pin is in the wrong place.
-        a.coords       = null;
-        a.geocodedReal = false;
-        a.geocodeIssue = r.error
+        a.coords         = null;
+        a.geocodedReal   = false;
+        a.geocodeWarning = null;
+        a.geocodeIssue   = r.error
           ? `Address not found: ${r.error}`
           : `Address only matched loosely${r.label ? ` (got "${r.label}")` : ''} — needs a more exact street address`;
       }
@@ -400,13 +408,29 @@ function escHtml(str) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
-let map, overlapLayer, pinLayer;
+let map, overlapLayer, pinLayer, highlightLayer;
+
+// Which map marker holds each applicant, so clicking a name in a list can go
+// straight to their dot. Rebuilt on every renderMap.
+let markerForApplicant = new Map();
+// Set once the view has been framed around the pins, so re-rendering after a
+// match run doesn't yank the map back from wherever the organizer panned it.
+let mapFramed = false;
+// Who is currently ringed on the map. Held across renders so approving a group
+// doesn't silently drop the ring the organizer is using to read the map.
+let selectedApplicantId = null;
 
 function initMap() {
-  map = L.map('map', { zoomControl: false, attributionControl: false }).setView([60.185, 24.93], 12);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
-  overlapLayer = L.layerGroup().addTo(map);
-  pinLayer     = L.layerGroup().addTo(map);
+  // The opening view is a placeholder only. Applicants are no longer all in
+  // Uusimaa, so the real view comes from fitBounds over the actual pins in
+  // renderMap. A hardcoded Helsinki view left a Tampere dataset off-screen.
+  map = L.map('map', { attributionControl: false }).setView([64.0, 26.0], 5);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+  overlapLayer   = L.layerGroup().addTo(map);
+  pinLayer       = L.layerGroup().addTo(map);
+  // Above the pins, so the ring drawn around a selected person is never
+  // hidden underneath a neighbouring dot.
+  highlightLayer = L.layerGroup().addTo(map);
 }
 
 const GROUP_COLORS = ['#3F6C51', '#C1622D', '#5B6EC9', '#B0447A', '#3F8F8F', '#8A7A3F'];
@@ -427,31 +451,126 @@ function applicantCandidateColor(applicantId) {
   return cand ? candidateColor(cand.candidateId) : null;
 }
 
+// Five decimal places is about a metre: anyone sharing a building, and in
+// practice anyone the address register places at the same entrance.
+function pinKey(coords) {
+  return coords[0].toFixed(5) + ',' + coords[1].toFixed(5);
+}
+
+// One entry per distinct location, holding everyone at it. Two mothers in the
+// same building produced two markers drawn on exactly the same pixel, so the
+// second was invisible and the map appeared to be missing people: 17 applicants
+// showed as 7 dots. Grouping them makes the hidden ones countable and clickable.
+function groupApplicantsByLocation(applicants) {
+  const spots = new Map();
+  applicants.forEach((a) => {
+    const key = pinKey(a.coords);
+    if (!spots.has(key)) spots.set(key, { coords: a.coords, people: [] });
+    spots.get(key).people.push(a);
+  });
+  return [...spots.values()];
+}
+
+function applicantPopupHtml(a) {
+  const groupName = a.matchGroupId
+    ? escHtml(state.groups.find((g) => g.id === a.matchGroupId)?.name ?? '')
+    : '';
+  return `<strong>${escHtml(a.id)}</strong> ${escHtml(a.name)}` +
+    `${a.expecting ? ' (expecting)' : ''}<br>` +
+    `${escHtml(a.street + ', ' + a.neighborhood)}<br>` +
+    `${a.language.map(escHtml).join(', ')}<br>` +
+    `${a.transport.map(escHtml).join('')} ${escHtml(a.maxTravel)}<br>` +
+    `${a.matchGroupId ? 'Group: ' + groupName : 'Status: ' + escHtml(a.matchStatus)}` +
+    (a.geocodeWarning ? `<br><em>${escHtml(a.geocodeWarning)}</em>` : '');
+}
+
 function renderMap() {
   pinLayer.clearLayers();
-  state.applicants
-    .filter((a) => !a.hasDataIssues && a.geocodedReal && a.coords)
-    .forEach((a) => {
-      const groupColor = colorForGroup(a.matchGroupId) || applicantCandidateColor(a.id);
-      const isMatched  = !!groupColor;
-      const marker = L.circleMarker(a.coords, {
-        radius: 9, color: isMatched ? groupColor : '#8A8577', weight: 2,
-        fillColor: isMatched ? groupColor : '#FAF9F6',
-        fillOpacity: isMatched ? 0.9 : 0.5, dashArray: isMatched ? null : '3,2',
-      }).addTo(pinLayer);
+  highlightLayer.clearLayers();
+  markerForApplicant = new Map();
 
-      const groupName = a.matchGroupId
-        ? escHtml(state.groups.find((g) => g.id === a.matchGroupId)?.name ?? '')
-        : '';
-      marker.bindPopup(
-        `<strong>${escHtml(a.id)}</strong><br/>`+
-        `${escHtml(a.name)}<br/>`+
-        `${escHtml(a.street + ", " + a.neighborhood)}<br>` +
-        `${a.language.map(escHtml).join(', ')}<br>` +
-        `${a.transport.map(escHtml).join('')} ${a.maxTravel}<br>` +
-        `${a.matchGroupId ? 'Group: ' + groupName : 'Status: ' + escHtml(a.matchStatus)}`
-      );
-    });
+  const placed = state.applicants.filter((a) => !a.hasDataIssues && a.geocodedReal && a.coords);
+
+  groupApplicantsByLocation(placed).forEach((spot) => {
+    const { coords, people } = spot;
+    // A shared pin takes its colour from whichever of its occupants is in a
+    // group, so a dot never looks unmatched when someone under it is matched.
+    const groupColor = people.map((a) => colorForGroup(a.matchGroupId) || applicantCandidateColor(a.id))
+                             .find(Boolean) || null;
+    const isMatched  = !!groupColor;
+    const shared     = people.length > 1;
+
+    const marker = L.circleMarker(coords, {
+      radius: shared ? 12 : 9,
+      color: isMatched ? groupColor : '#8A8577',
+      weight: shared ? 3 : 2,
+      fillColor: isMatched ? groupColor : '#FAF9F6',
+      fillOpacity: isMatched ? 0.9 : 0.5,
+      dashArray: isMatched ? null : '3,2',
+    }).addTo(pinLayer);
+
+    if (shared) {
+      // Permanent count on the dot: the organizer can see at a glance that
+      // something is underneath, which is what she previously had to drag
+      // dots around in Google Maps to discover.
+      marker.bindTooltip(String(people.length), {
+        permanent: true, direction: 'center', className: 'pin-count',
+      });
+    }
+
+    marker.bindPopup(
+      shared
+        ? `<strong>${people.length} people at this address</strong>` +
+          `<div class="pin-popup-list">${people.map(applicantPopupHtml).join('<hr>')}</div>`
+        : applicantPopupHtml(people[0]),
+      { maxHeight: 260 }
+    );
+
+    people.forEach((a) => markerForApplicant.set(a.id, marker));
+  });
+
+  frameMapAroundPins(placed);
+  // Re-draw the ring for whoever was selected. The layer was just cleared, and
+  // losing the highlight on every render made it useless as soon as anything
+  // else on the page changed.
+  if (selectedApplicantId) drawHighlightRing(selectedApplicantId);
+}
+
+// Frames the view around everyone who has a location, once. Without this the
+// map sat on its opening view and a dataset outside that view looked empty.
+function frameMapAroundPins(placed) {
+  if (mapFramed || placed.length === 0) return;
+  const bounds = L.latLngBounds(placed.map((a) => a.coords));
+  map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+  mapFramed = true;
+}
+
+// Drawn unfilled, so the dot underneath stays readable through the ring.
+function drawHighlightRing(applicantId) {
+  const marker = markerForApplicant.get(applicantId);
+  if (!marker) return null;
+  L.circleMarker(marker.getLatLng(), {
+    radius: 20, color: '#C1622D', weight: 3, fill: false, className: 'pin-highlight',
+  }).addTo(highlightLayer);
+  return marker;
+}
+
+// Rings a single person on the map and brings them into view. This is the
+// answer to "where is this person" for someone sitting under another dot: the
+// ring is drawn on top, and the popup opens on their own entry.
+function focusApplicantOnMap(applicantId) {
+  highlightLayer.clearLayers();
+  if (!getApplicant(applicantId)) return false;
+
+  const marker = drawHighlightRing(applicantId);
+  if (!marker) return false;
+  selectedApplicantId = applicantId;
+
+  // Zoom in enough that neighbouring buildings separate, but never zoom out
+  // from wherever the organizer already is.
+  map.setView(marker.getLatLng(), Math.max(map.getZoom(), 15), { animate: true });
+  marker.openPopup();
+  return true;
 }
 
 async function drawOverlap(candidateId) {
@@ -625,17 +744,29 @@ function applicantCard(a, mapColor) {
     ? `<span class="participant-map-dot" style="background:${escHtml(mapColor)}; border-color:${escHtml(mapColor)}" aria-label="Map dot color"></span>`
     : '';
 
+  // An expecting mother's date is a due date, not a birthday. Worth saying so
+  // on the row: it changes how the coordinator writes to her, and whether the
+  // group she lands in is one of newborns or one still waiting.
+  const expectingBadge = a.expecting ? ' <span class="badge badge-expecting">expecting</span>' : '';
+
+  // Only offer "show on map" to someone who actually has a pin; a disabled
+  // control on an un-geocoded row would just be a dead end.
+  const locatable = a.geocodedReal && a.coords;
+  const locateBtn = locatable
+    ? `<button class="locate-btn" type="button" data-locate="${escHtml(a.id)}" title="Show on map">📍</button>`
+    : '';
+
   return `
-    <div class="mini-card unmatched-card applicant-card">
+    <div class="mini-card unmatched-card applicant-card${locatable ? ' locatable' : ''}" data-applicant-id="${escHtml(a.id)}">
       <div class="unmatched-summary">
         <span class="participant-id-wrap">${mapDot}<button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.id)}</button></span>
-        <span>${escHtml(a.name)} · ${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span>
-        <span>${a.geocodedReal && a.coords ? escHtml(a.coords) : '<em>no location</em>'}</span>
+        <span>${escHtml(a.name)}${expectingBadge} · ${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span>
+        <span class="applicant-locate">${a.geocodedReal && a.coords ? escHtml(a.coords) : '<em>no location</em>'}${locateBtn}</span>
       </div>
       <div class="applicant-details" hidden>
         ${detailRow('Name', a.name)}
         ${phoneRow()}
-        ${detailRow('Baby DOB', MatchingEngine.formatMonthYear(a.dob))}
+        ${detailRow(a.expecting ? 'Due' : 'Baby DOB', MatchingEngine.formatMonthYear(a.dob))}
         ${detailRow('Languages', a.language.join(', '))}
         ${detailRow('Transport', `${a.transport.join('')} ${a.maxTravel}`)}
         ${detailRow('Address', `${a.street}, ${a.neighborhood}`)}
@@ -660,6 +791,35 @@ function attachApplicantDetailToggles(container) {
       btn.setAttribute('aria-expanded', String(!isOpen));
     });
   });
+
+  // Clicking a person anywhere on their row locates them on the map. The
+  // explicit pin button is there for discoverability; the whole-row handler is
+  // what the organizer actually reaches for. Buttons and links inside the row
+  // keep their own behaviour, so expanding details or opening WhatsApp still
+  // works.
+  container.querySelectorAll('.applicant-card.locatable').forEach((card) => {
+    card.addEventListener('click', (event) => {
+      if (event.target.closest('a')) return;
+      if (event.target.closest('button') && !event.target.closest('.locate-btn')) return;
+      selectApplicantOnMap(card.dataset.applicantId);
+    });
+  });
+}
+
+// Keeps the map selection and the list selection in step, so it is obvious
+// which row the ringed dot belongs to.
+function selectApplicantOnMap(applicantId) {
+  if (!applicantId) return;
+  document.querySelectorAll('.applicant-card.selected')
+    .forEach((el) => el.classList.remove('selected'));
+  document.querySelectorAll(`.applicant-card[data-applicant-id="${cssEscape(applicantId)}"]`)
+    .forEach((el) => el.classList.add('selected'));
+  focusApplicantOnMap(applicantId);
+}
+
+// Applicant ids come from a hand-edited sheet, so they can contain anything.
+function cssEscape(value) {
+  return window.CSS && CSS.escape ? CSS.escape(value) : String(value).replace(/["\\]/g, '\\$&');
 }
 
 function renderActiveGroups() {
@@ -717,9 +877,23 @@ function renderDataIssues() {
     .map((a) => ({ a, issues: [...(a.hasDataIssues ? a.dataIssues : []), ...(a.geocodeIssue ? [a.geocodeIssue] : [])] }))
     .filter((r) => r.issues.length > 0);
 
-  container.innerHTML = flagged.length
-    ? flagged.map(({ a, issues }) => `<div class="mini-card issue-card"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}) — ${issues.map(escHtml).join('; ')}</span></div>`).join('')
+  // Placed, but not exactly where the sheet said. These are on the map and in
+  // the matching pool, so they are listed apart from the blocking issues;
+  // lumping them together would make the blocking list look longer than the
+  // number of people actually missing from the map.
+  const warned = state.applicants.filter((a) => !a.hasDataIssues && a.geocodedReal && a.geocodeWarning);
+
+  const blocking = flagged.length
+    ? flagged.map(({ a, issues }) => `<div class="mini-card issue-card" data-applicant-id="${escHtml(a.id)}"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}): ${issues.map(escHtml).join('; ')}</span></div>`).join('')
     : `<div class="empty-state">No data issues found in the current sheet.</div>`;
+
+  const approximate = warned.length
+    ? `<div class="issue-subhead">On the map, but worth checking (${warned.length})</div>` +
+      warned.map((a) => `<div class="mini-card warning-card applicant-card locatable" data-applicant-id="${escHtml(a.id)}"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}): ${escHtml(a.geocodeWarning)}</span></div>`).join('')
+    : '';
+
+  container.innerHTML = blocking + approximate;
+  attachApplicantDetailToggles(container);
 }
 
 function renderSettingsTab() {
@@ -883,6 +1057,10 @@ function wireControls() {
     btn.disabled = true;
     btn.textContent = 'Syncing…';
     const success = await loadFromBackend();
+    // An explicit sync may bring in a different set of people entirely (a
+    // second city, or addresses just fixed in the sheet), so re-frame the map
+    // around whatever is there now instead of keeping the previous view.
+    mapFramed = false;
     populateNeighborhoodFilter();
     renderSettingsTab();
     renderAll();

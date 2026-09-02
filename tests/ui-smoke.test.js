@@ -49,20 +49,42 @@ test.afterEach(async () => {
   await new Promise((r) => setTimeout(r, 150));
 });
 
-function fakeLeaflet() {
-  function chainable() {
-    const obj = {};
-    ["addTo", "setView", "bindPopup", "clearLayers"].forEach((m) => (obj[m] = () => obj));
+// Records what the app asked Leaflet to draw, so the map behaviour that can't
+// be seen in the DOM (how many pins, which ones share a spot, whether the
+// view was framed) is still assertable without a browser.
+function fakeLeaflet(record) {
+  function chainable(extra = {}) {
+    const obj = {
+      addTo:      () => obj,
+      clearLayers: () => obj,
+      invalidateSize: () => obj,
+      setView:    (...args) => { record.setViews.push(args); return obj; },
+      fitBounds:  (bounds, opts) => { record.fitBounds.push({ bounds, opts }); return obj; },
+      getZoom:    () => 12,
+      bindPopup:  (html) => { obj.popupHtml = html; return obj; },
+      bindTooltip: (text, opts) => { obj.tooltip = text; record.tooltips.push({ text, opts }); return obj; },
+      openPopup:  () => { record.openedPopups.push(obj.popupHtml); return obj; },
+    };
+    Object.assign(obj, extra);
     return obj;
   }
   return {
     map: () => chainable(),
     tileLayer: () => chainable(),
     layerGroup: () => chainable(),
-    circleMarker: () => chainable(),
+    circleMarker: (coords, opts) => {
+      const marker = chainable({ getLatLng: () => coords, coords, opts });
+      record.markers.push(marker);
+      return marker;
+    },
     circle: () => chainable(),
     geoJSON: () => chainable(),
+    latLngBounds: (coords) => { record.bounds.push(coords); return { coords }; },
   };
+}
+
+function newLeafletRecord() {
+  return { markers: [], tooltips: [], setViews: [], fitBounds: [], bounds: [], openedPopups: [] };
 }
 
 // Builds a jsdom window with the real markup + real scripts evaluated in
@@ -89,7 +111,9 @@ function buildWindow() {
   const dom = new JSDOM(htmlWithoutScripts, { url: `http://localhost/?backend=${BASE_URL}`, runScripts: "dangerously", virtualConsole });
   const { window } = dom;
 
-  window.L = fakeLeaflet();
+  const leafletRecord = newLeafletRecord();
+  window.__leaflet__ = leafletRecord;
+  window.L = fakeLeaflet(leafletRecord);
   window.fetch = fetch; // Node's built-in global fetch, shared across realms
   window.alert = () => {};
   window.navigator.clipboard = { writeText: async () => {} };
@@ -114,6 +138,7 @@ function buildWindow() {
     computeCandidateGroups, approveGroup, rejectGroup, markStatus,
     getApplicant, renderCandidateCards, renderAll, waLink, syncToBackend, init,
     populateNeighborhoodFilter, renderSettingsTab,
+    renderMap, groupApplicantsByLocation, focusApplicantOnMap, selectApplicantOnMap,
   };`;
   window.document.body.appendChild(hook);
 
@@ -124,8 +149,9 @@ test("UI smoke: init() loads real applicants from the backend into state", async
   const window = buildWindow();
   await window.__test__.init();
   assert.equal(window.__test__.state.usingBackendData, true);
-  assert.equal(window.__test__.state.applicants.length, 150);
-  assert.equal(window.__test__.state.applicants.filter((a) => a.hasDataIssues).length, 6);
+  const dataRows = fs.readFileSync(CSV_PATH, "utf8").trim().split(/\r?\n/).length - 1;
+  assert.equal(window.__test__.state.applicants.length, dataRows);
+  assert.ok(window.__test__.state.applicants.filter((a) => a.hasDataIssues).length > 0);
 });
 
 test("UI smoke: data issues render into the DOM with readable reasons", async () => {
@@ -416,4 +442,150 @@ test("UI smoke: settings changes round-trip to the backend", async () => {
   });
   const { result } = await resp.json();
   assert.equal(result.maxAgeGap, 9);
+});
+
+// ---------------------------------------------------------------------------
+// Map behaviour. Two people at one address used to be drawn as two markers on
+// the same pixel, so the second was invisible: a 17-person dataset showed as
+// 7 dots and there was no way to tell from the app that anyone was hidden.
+// ---------------------------------------------------------------------------
+
+test("UI smoke: people at the same address share one pin, labelled with the count", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  const placed = window.__test__.state.applicants.filter((a) => !a.hasDataIssues && a.geocodedReal && a.coords);
+  const spots  = window.__test__.groupApplicantsByLocation(placed);
+  const shared = spots.filter((s) => s.people.length > 1);
+
+  // The Leaflet stub's clearLayers is a no-op, so the record holds every
+  // render init did. Start clean and draw once.
+  Object.assign(window.__leaflet__, { markers: [], tooltips: [], setViews: [], fitBounds: [], bounds: [], openedPopups: [] });
+  window.__test__.renderMap();
+
+  assert.ok(shared.length > 0, "the sample must contain people sharing an address");
+  // Every person is on exactly one pin, and there are fewer pins than people.
+  assert.equal(spots.reduce((n, s) => n + s.people.length, 0), placed.length);
+  assert.ok(spots.length < placed.length, "shared addresses must collapse into fewer pins");
+
+  // The count is what makes a hidden person discoverable.
+  const counts = window.__leaflet__.tooltips.map((t) => Number(t.text));
+  assert.ok(counts.length > 0, "expected a count label on at least one shared pin");
+  // Joined, because arrays built inside the jsdom realm are not
+  // reference-equal to arrays built here even when their contents match.
+  assert.equal(
+    counts.slice().sort((a, b) => a - b).join(","),
+    shared.map((s) => s.people.length).sort((a, b) => a - b).join(",")
+  );
+  // And the popup names everyone standing on that pin, not just the first.
+  const sharedMarker = window.__leaflet__.markers.find((m) => m.tooltip);
+  assert.match(sharedMarker.popupHtml, /people at this address/);
+});
+
+test("UI smoke: the map frames itself around the pins rather than a fixed city", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  // The opening view was hardcoded to Helsinki at zoom 12, which left a
+  // Tampere dataset entirely off-screen.
+  assert.equal(window.__leaflet__.fitBounds.length, 1, "expected the view to be fitted to the pins once");
+  const framed = window.__leaflet__.bounds[0];
+  assert.ok(framed.length > 1);
+
+  const lats = framed.map((c) => c[0]);
+  assert.ok(Math.max(...lats) - Math.min(...lats) > 1, "the sample must span well beyond one city");
+});
+
+test("UI smoke: clicking a person in a list rings them on the map", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  const target = window.__test__.state.applicants.find((a) => !a.hasDataIssues && a.geocodedReal && a.coords);
+  const before = window.__leaflet__.openedPopups.length;
+
+  assert.equal(window.__test__.focusApplicantOnMap(target.id), true);
+  assert.equal(window.__leaflet__.openedPopups.length, before + 1, "the person's popup should open");
+
+  // A highlight ring, drawn unfilled so the dot underneath stays visible.
+  const ring = window.__leaflet__.markers.filter((m) => m.opts && m.opts.fill === false).pop();
+  assert.ok(ring, "expected a highlight ring");
+  assert.equal(ring.coords.lat ?? ring.coords[0], target.coords[0]);
+  assert.equal(ring.coords.lng ?? ring.coords[1], target.coords[1]);
+
+  // And it brings the person into view without zooming back out.
+  const lastView = window.__leaflet__.setViews.pop();
+  assert.ok(lastView, "expected the map to move to the person");
+  assert.ok(lastView[1] >= 12, "focusing must not zoom further out than the current view");
+});
+
+test("UI smoke: an un-geocoded person gets no map affordance and no crash", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  const stranded = window.__test__.state.applicants.find((a) => !a.geocodedReal);
+  assert.ok(stranded, "the sample must contain someone who cannot be placed");
+  // Returns false rather than throwing, so a click on a flagged row is inert.
+  assert.equal(window.__test__.focusApplicantOnMap(stranded.id), false);
+  assert.equal(window.__test__.focusApplicantOnMap("no-such-id"), false);
+});
+
+test("UI smoke: a located row is marked selected so the list and map agree", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  const unmatched = window.document.getElementById("unmatchedList");
+  const card = unmatched.querySelector(".applicant-card.locatable");
+  assert.ok(card, "expected a locatable applicant row under the map");
+  assert.ok(card.querySelector(".locate-btn"), "expected a show-on-map control");
+
+  card.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  assert.ok(card.classList.contains("selected"), "the clicked row should be marked selected");
+
+  // Expanding details must still work and must not steal the click.
+  const other = [...unmatched.querySelectorAll(".applicant-card.locatable")][1];
+  if (other) {
+    other.querySelector(".id-toggle").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+    assert.equal(other.querySelector(".applicant-details").hidden, false);
+  }
+});
+
+test("UI smoke: the highlight survives a re-render", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  const target = window.__test__.state.applicants.find((a) => !a.hasDataIssues && a.geocodedReal && a.coords);
+  window.__test__.focusApplicantOnMap(target.id);
+
+  // Approving a group or running matching re-renders the map, which clears
+  // every layer. The ring has to come back, or it disappears the moment
+  // anything else on the page changes.
+  Object.assign(window.__leaflet__, { markers: [], tooltips: [], setViews: [], fitBounds: [], bounds: [], openedPopups: [] });
+  window.__test__.renderMap();
+
+  const ring = window.__leaflet__.markers.find((m) => m.opts && m.opts.fill === false);
+  assert.ok(ring, "the ring should be redrawn after a re-render");
+  assert.equal(ring.coords.lat ?? ring.coords[0], target.coords[0]);
+  // Re-rendering must not move the view; the organizer may have panned away.
+  assert.equal(window.__leaflet__.setViews.length, 0);
+});
+
+test("UI smoke: expecting mothers are matched and marked as expecting", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  const expecting = window.__test__.state.applicants.filter((a) => a.expecting);
+  assert.ok(expecting.length > 0, "the sample must contain mothers who have not given birth yet");
+  // They are ordinary applicants, not a flagged special case; joining before
+  // the birth is the point.
+  assert.ok(expecting.some((a) => a.eligibleForMatching), "expecting mothers must be eligible for matching");
+
+  // Their date reads as a due date rather than a birthday wherever it shows.
+  const withCard = expecting.find((a) => !a.hasDataIssues && a.geocodedReal && a.matchStatus === "unmatched");
+  if (withCard) {
+    const row = window.document.querySelector(`#unmatchedList .applicant-card[data-applicant-id="${withCard.id}"]`);
+    if (row) {
+      assert.match(row.innerHTML, /badge-expecting/);
+      assert.match(row.innerHTML, /Due/);
+    }
+  }
 });

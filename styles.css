@@ -209,6 +209,9 @@ button:hover { background: var(--surface-muted); }
   border-radius: 999px;
 }
 .badge-pending { background: var(--warning-bg); color: var(--warning-text); }
+/* A due date rather than a birthday. Deliberately quiet, because it is context for
+   the coordinator, not a problem to fix. */
+.badge-expecting { background: var(--surface-muted); color: var(--text-secondary); }
 .badge-score { background: var(--success-bg); color: var(--success-text); font-variant-numeric: tabular-nums; }
 
 .rank-badge {
@@ -332,6 +335,66 @@ button:hover { background: var(--surface-muted); }
 .issue-card {
   background: var(--danger-bg);
   color: var(--danger-text);
+}
+
+/* Placed on the map but not at the exact house number asked for. Amber
+   rather than red: these people are matched and visible, they just deserve
+   a glance. */
+.warning-card {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+.issue-subhead {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 14px 0 6px;
+}
+
+/* --- Locating a person on the map ------------------------------------- */
+/* A whole applicant row is clickable, so it needs to look it. */
+.applicant-card.locatable { cursor: pointer; }
+.applicant-card.locatable:hover { background: var(--surface); box-shadow: inset 0 0 0 1px var(--border); }
+.applicant-card.selected {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: var(--surface);
+}
+.applicant-locate { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+.locate-btn {
+  border: none;
+  background: transparent;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.55;
+}
+.applicant-card.locatable:hover .locate-btn,
+.applicant-card.selected .locate-btn { opacity: 1; }
+.locate-btn:hover { background: transparent; }
+
+/* Count drawn on a pin that holds more than one person. Without it, people
+   at the same address are hidden under each other with nothing to show it. */
+.pin-count {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+}
+.pin-count::before { display: none; }
+.pin-popup-list { max-height: 200px; overflow-y: auto; }
+.pin-popup-list hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
+
+/* The ring around the currently selected person. */
+.pin-highlight { animation: pin-pulse 1.4s ease-out 2; }
+@keyframes pin-pulse {
+  0%   { opacity: 1; }
+  50%  { opacity: 0.25; }
+  100% { opacity: 1; }
 }
 
 .hint { font-size: 13px; color: var(--text-secondary); margin-bottom: 16px; }
