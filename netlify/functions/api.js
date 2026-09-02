@@ -374,89 +374,337 @@ async function sheetSaveSettings(settings) {
 // ---------------------------------------------------------------------------
 // Geocoding — Digitransit Pelias API
 // ---------------------------------------------------------------------------
-// Digitransit's geocoder discards the municipality in a free-text query and
-// fuzzy-matches the street name across all of Finland — "Jokikatu 11, Porvoo"
-// comes back as Jokikatu 11 in Joensuu, 400km away, at 0.96 confidence. So the
-// confidence score is useless for catching this; what makes a result
-// trustworthy is anchoring the search to the district and then checking the hit
-// really landed there. Measured on 12 sample addresses: 9/9 correct anchored
-// per district, 7/12 with a single region-wide anchor.
-async function geocodeBatch(entries) {
+// Digitransit's geocoder covers all of Finland, but it treats the query as
+// free text: it discards the municipality and fuzzy-matches the street name
+// nationally, so "Jokikatu 11, Porvoo" comes back as Jokikatu 11 in Joensuu,
+// 400km away, at 0.96 confidence. Confidence is therefore useless for
+// catching this.
+//
+// The previous version fought that by passing a Uusimaa-shaped `boundary.rect`
+// and rejecting anything outside a radius of a hand-kept district centre. Both
+// halves broke as soon as the tool was pointed at Tampere:
+//
+//   * The rect clipped Pirkanmaa out of the result set, so the only candidates
+//     left for a Tampere street were same-named streets in Uusimaa. Every one
+//     of eight sample Tampere addresses came back in Helsinki, Hyvinkää,
+//     Espoo, Salo or Järvenpää.
+//   * A district name in the query text can return zero results outright:
+//     "Vaasankatu 5, Kallio" finds nothing while "Vaasankatu 5, Helsinki" is
+//     an exact hit. That is why addresses Google resolves fine never appeared.
+//
+// So: search nationally, ask several differently-phrased questions rather than
+// one, and do the verifying ourselves on the way out, at MUNICIPALITY level.
+// Street names repeat across Finland but are effectively unique within a
+// municipality, which makes the municipality the check that actually works.
+// Regions.scoreCandidate holds that logic and is unit-tested without network.
+const GEOCODE_URL = 'https://api.digitransit.fi/geocoding/v1/search';
+
+// How many applicants to geocode at once. One request per applicant with no
+// limit is fine for a dozen rows and gets rate-limited at a few hundred, which
+// showed up as a handful of people mysteriously missing from the map.
+const GEOCODE_CONCURRENCY = 6;
+
+// Digitransit rate-limits per key, and a 300-applicant sync overran it: 20-odd
+// people came back as "geocoder unavailable" purely because the batch was
+// large. Requests are spaced globally rather than per worker, so the ceiling
+// holds however many workers are running.
+const MIN_REQUEST_SPACING_MS = 110;
+let _nextRequestSlot = 0;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function awaitRequestSlot() {
+  const now  = Date.now();
+  const slot = Math.max(now, _nextRequestSlot);
+  _nextRequestSlot = slot + MIN_REQUEST_SPACING_MS;
+  if (slot > now) await sleep(slot - now);
+}
+
+function digitransitKey() {
   const key = process.env.DIGITRANSIT_API_KEY;
   if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
+  return key;
+}
 
-  return Promise.all(entries.map(async (entry) => {
-    const rawStreet    = typeof entry === 'string' ? entry : (entry.street || '');
-    const neighborhood = typeof entry === 'string' ? ''    : (entry.neighborhood || '');
+// Rate limiting and the occasional 502 are expected on a shared public API, so
+// they are retried rather than surfaced as "address not found", since a transient
+// failure and a bad address need different reactions from the organizer.
+async function geocoderSearch(params, attempt = 0) {
+  await awaitRequestSlot();
+  const resp = await fetch(`${GEOCODE_URL}?${new URLSearchParams(params)}`, {
+    headers: { 'digitransit-subscription-key': digitransitKey() },
+  });
+  if ((resp.status === 429 || resp.status >= 500) && attempt < 5) {
+    // Jittered, so workers that were throttled together don't all come back
+    // at the same moment and throttle each other again.
+    await sleep(500 * 2 ** attempt + Math.random() * 250);
+    return geocoderSearch(params, attempt + 1);
+  }
+  if (!resp.ok) throw new Error(`geocoder returned HTTP ${resp.status}`);
+  return resp.json();
+}
 
-    // The sheet is hand-filled, so the cell may carry an apartment number, a
-    // stair, a postal code or a care-of line. None of that helps the geocoder
-    // and some of it makes it miss entirely, so the query uses a cleaned
-    // street while the response reports the original.
-    const street  = Regions.normalizeStreet(rawStreet) || rawStreet;
-    const anchor  = Regions.resolveDistrict(neighborhood);
-    const centre  = anchor ? anchor.coords : null;
-    const base    = { street: rawStreet, neighborhood, queried: street };
+// Pelias features carry the administrative hierarchy of a hit as properties.
+// Those, not the coordinates, are what tell us whether it is in the right
+// place, so they are lifted into the flat shape Regions.scoreCandidate takes.
+function toCandidate(feature) {
+  const [lon, lat] = feature.geometry.coordinates;
+  const p = feature.properties || {};
+  return {
+    lat, lon,
+    label:         p.label || null,
+    localadmin:    p.localadmin || null,
+    locality:      p.locality || null,
+    neighbourhood: p.neighbourhood || null,
+    borough:       p.borough || null,
+    confidence:    p.confidence,
+    layer:         p.layer || null,
+  };
+}
 
-    const params = new URLSearchParams({
-      text:               [street, anchor ? anchor.name : neighborhood, 'Finland'].filter(Boolean).join(', '),
-      size:               '5',
-      layers:             'address',
-      'boundary.country': 'FIN',
+// Municipality names resolved from the geocoder's own localadmin layer, so any
+// of Finland's 309 municipalities works without a hand-kept table. Cached for
+// the life of the warm Lambda: municipality names do not change, and a batch
+// of 300 applicants usually spans only a handful of them.
+const _municipalityCache = new Map();
+
+async function resolveMunicipalityName(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return null;
+  const key = trimmed.toLowerCase();
+  if (_municipalityCache.has(key)) return _municipalityCache.get(key);
+
+  let resolved = null;
+  try {
+    const data = await geocoderSearch({
+      text: trimmed, size: '5', layers: 'localadmin', 'boundary.country': 'FIN',
     });
-    if (centre) {
-      params.set('focus.point.lat', String(centre[0]));
-      params.set('focus.point.lon', String(centre[1]));
-      params.set('boundary.circle.lat', String(centre[0]));
-      params.set('boundary.circle.lon', String(centre[1]));
-      params.set('boundary.circle.radius', String(anchor.radiusKm));
-    } else {
-      const b = Regions.REGION_BOUNDS;
-      params.set('focus.point.lat', String(Regions.REGION_CENTRE[0]));
-      params.set('focus.point.lon', String(Regions.REGION_CENTRE[1]));
-      params.set('boundary.rect.min_lat', String(b.minLat));
-      params.set('boundary.rect.max_lat', String(b.maxLat));
-      params.set('boundary.rect.min_lon', String(b.minLon));
-      params.set('boundary.rect.max_lon', String(b.maxLon));
+    // Exact name equality only. A fuzzy localadmin hit is exactly the failure
+    // mode being defended against: "Hervanta" ranks "Herva, Ii" first, 600km
+    // north, and anchoring on that would be worse than having no anchor.
+    const hit = (data.features || []).find((f) =>
+      Regions.placeNameMatches(trimmed, f.properties.localadmin) ||
+      Regions.placeNameMatches(trimmed, f.properties.name));
+    if (hit) {
+      const [lon, lat] = hit.geometry.coordinates;
+      resolved = { name: hit.properties.localadmin || hit.properties.name, coords: [lat, lon] };
     }
+  } catch (err) {
+    // A lookup failure must not decide the address's fate; verification just
+    // falls back to matching the area name against the hit's own fields.
+    resolved = null;
+  }
+  _municipalityCache.set(key, resolved);
+  return resolved;
+}
 
+// What the Neighbourhood cell actually refers to. The curated table answers
+// instantly and maps a district to its city ("Hervanta" -> Tampere); anything
+// it doesn't know is put to the geocoder, one comma-separated part at a time,
+// so "Kaleva, Tampere" still finds Tampere.
+async function resolveArea(areaRaw) {
+  const known = Regions.resolveDistrict(areaRaw);
+  if (known) return { municipality: known.municipality, centre: known.coords };
+
+  for (const part of Regions.areaLookupCandidates(areaRaw)) {
+    const hit = await resolveMunicipalityName(part);
+    if (hit) return { municipality: hit.name, centre: hit.coords };
+  }
+  return { municipality: null, centre: null };
+}
+
+// Several phrasings of the same address, most specific first. The ladder
+// exists because Pelias is inconsistent about qualifiers: a district name can
+// pin the right city ("Insinöörinkatu 60, Hervanta" is exact) or return
+// nothing at all ("Vaasankatu 5, Kallio"). Appending the municipality rescues
+// the second case, and asking bare street-only last covers a mis-typed area.
+function buildQueries(street, area, municipality) {
+  const queries = [];
+  const push = (text) => { if (text && !queries.includes(text)) queries.push(text); };
+  const areaIsCity = area && municipality && Regions.placeNameMatches(area, municipality);
+
+  if (municipality && area && !areaIsCity) push(`${street}, ${area}, ${municipality}`);
+  if (municipality) push(`${street}, ${municipality}`);
+  if (area) push(`${street}, ${area}`);
+  push(street);
+  return queries;
+}
+
+async function geocodeOne(entry) {
+  const rawStreet    = typeof entry === 'string' ? entry : (entry.street || '');
+  const neighborhood = typeof entry === 'string' ? ''    : (entry.neighborhood || '');
+
+  // The sheet is hand-filled, so the cell may carry an apartment number, a
+  // stair, a postal code or a care-of line. None of that helps the geocoder
+  // and some of it makes it miss entirely, so the query uses a cleaned
+  // street while the response reports the original.
+  const street = Regions.normalizeStreet(rawStreet) || rawStreet;
+  const base   = { street: rawStreet, neighborhood, queried: street };
+
+  if (!street.trim()) return { ...base, precise: false, error: 'no street address given' };
+
+  // A Street address column holding "Kaleva" or "Tampere": a place, not an
+  // address. No geocoder can place that to a house, but the place itself is
+  // known, so the person goes on the map at its centre and is labelled as
+  // such. Refusing outright is what dropped people off the map entirely; a
+  // dot at the centre of their district is both honest and usable for a
+  // travel-time radius, and the organizer can see it needs fixing.
+  const placeOnlyStreet = Regions.looksLikePlaceNameOnly(street) ? Regions.resolveDistrict(street) : null;
+  if (placeOnlyStreet) {
+    // Whichever of the two cells is more specific: a district beats the city
+    // it sits in, wherever the organizer happened to type it.
+    const areaAnchor = Regions.resolveDistrict(neighborhood);
+    const anchor = placeOnlyStreet.kind === 'district' ? placeOnlyStreet
+      : (areaAnchor && areaAnchor.kind === 'district' ? areaAnchor : placeOnlyStreet);
+    return {
+      ...base,
+      municipality: anchor.municipality,
+      lat: anchor.coords[0],
+      lon: anchor.coords[1],
+      label: anchor.name,
+      town: anchor.municipality,
+      precise: true,
+      precision: 'area',
+      houseDelta: null,
+      warning: `no street address in the sheet, so this is placed at the centre of ${anchor.name} and travel times are rough`,
+    };
+  }
+
+  const { municipality, centre } = await resolveArea(neighborhood);
+  const request = { street, area: neighborhood, municipality };
+  const withBase = { ...base, municipality };
+
+  // Nothing to verify a hit against. Guessing here is what put people in the
+  // wrong city, so the row is flagged for the organizer instead.
+  if (!municipality && !neighborhood.trim()) {
+    return { ...withBase, precise: false, error: 'no neighbourhood or city given, so the address cannot be placed with confidence' };
+  }
+
+  const common = { size: '15', 'boundary.country': 'FIN' };
+  // focus.point only re-ranks results, it never excludes them, so biasing
+  // towards the expected city is safe in a way boundary.rect was not.
+  if (centre) {
+    common['focus.point.lat'] = String(centre[0]);
+    common['focus.point.lon'] = String(centre[1]);
+  }
+
+  const seen = [];
+  let best = null;
+  let lastError = null;
+
+  for (const text of buildQueries(street, neighborhood, municipality)) {
+    let data;
     try {
-      const resp = await fetch(`https://api.digitransit.fi/geocoding/v1/search?${params}`, {
-        headers: { 'digitransit-subscription-key': key },
-      });
-      if (!resp.ok) {
-        return { ...base, precise: false, error: `geocoder returned HTTP ${resp.status}` };
-      }
-      const data = await resp.json();
-      const feat = (data.features || [])[0];
-      if (!feat) return { ...base, precise: false, error: 'no matching street address found' };
-
-      const [lon, lat] = feat.geometry.coordinates;
-      const label = feat.properties.label || null;
-      const town  = feat.properties.localadmin || feat.properties.locality || null;
-
-      // With a known district, check the hit is actually near it. Without one,
-      // the best available check is that the returned municipality matches
-      // what the organizer typed.
-      const inArea = anchor
-        ? Regions.withinAnchor(anchor, [lat, lon])
-        : !!(town && neighborhood && town.trim().toLowerCase() === neighborhood.trim().toLowerCase());
-      const sameStreet = Regions.streetNameMatches(street, label);
-      const precise    = inArea && sameStreet;
-
-      return {
-        ...base, lat, lon, label, town,
-        confidence: feat.properties.confidence,
-        precise,
-        error: precise ? undefined
-          : !inArea
-            ? `matched "${label || 'unknown'}"${town ? ` in ${town}` : ''}, which does not look like ${neighborhood || 'the given area'}`
-            : `no such street here — closest match was "${label || 'unknown'}"${street !== rawStreet ? ` (searched for "${street}")` : ''}`,
-      };
+      data = await geocoderSearch({ ...common, text, layers: 'address' });
     } catch (err) {
-      return { ...base, precise: false, error: err.message };
+      lastError = err.message;
+      continue;
     }
-  }));
+    for (const feature of data.features || []) seen.push(toCandidate(feature));
+    best = Regions.pickBestCandidate(request, seen);
+    if (best) break;
+  }
+
+  // Last resort: accept the street without a house number, if it is in the
+  // verified municipality. A pin at the right street in the right city is
+  // usable for a 30-minute travel radius and far better than dropping someone
+  // off the map, but it is reported so the organizer can decide.
+  let precision = 'exact';
+  if (!best) {
+    // Only the most specific phrasing is retried at street level. Re-running
+    // the whole ladder here tripled the request count for exactly the rows
+    // least likely to resolve, which is what pushed a 300-row batch over the
+    // rate limit.
+    const [mostSpecific] = buildQueries(street, neighborhood, municipality);
+    try {
+      const data = await geocoderSearch({ ...common, text: mostSpecific, layers: 'street' });
+      for (const feature of data.features || []) seen.push(toCandidate(feature));
+      best = Regions.pickBestCandidate(request, seen);
+      if (best) precision = 'street';
+    } catch (err) {
+      lastError = err.message;
+    }
+  }
+
+  if (!best) {
+    if (lastError) return { ...withBase, precise: false, error: `geocoder unavailable: ${lastError}` };
+    // Report what it did come back with, because "no such street here" and "right
+    // street, wrong city" need different fixes in the sheet.
+    const nearby = seen.find((c) => c.label);
+    return {
+      ...withBase,
+      precise: false,
+      error: nearby
+        ? `no match for "${street}" in ${municipality || neighborhood}; closest was "${nearby.label}"`
+        : `no address matching "${street}" found in ${municipality || neighborhood}`,
+    };
+  }
+
+  if (precision === 'exact' && best.houseDelta !== null && best.houseDelta > 0) precision = 'approximate';
+
+  // A house number tens of doors from the one asked for is a different part of
+  // a long street, so it is worth saying out loud even though the pin is
+  // close enough to match on.
+  const warning = precision === 'street'
+    ? `placed at street level, because "${street}" has no exact house number in the address register`
+    : best.houseDelta !== null && best.houseDelta > 20
+      ? `house number ${Regions.houseNumber(street)} not in the register; using nearest known "${best.label}"`
+      : undefined;
+
+  return {
+    ...withBase,
+    lat: best.lat,
+    lon: best.lon,
+    label: best.label,
+    town: best.localadmin || best.locality || null,
+    district: best.neighbourhood || best.borough || null,
+    confidence: best.confidence,
+    precise: true,
+    precision,
+    houseDelta: best.houseDelta,
+    matchedOn: best.reasons,
+    warning,
+  };
+}
+
+// Bounded concurrency rather than Promise.all over the whole batch: 300
+// applicants firing at once gets throttled, and a throttled request that
+// slipped through as a failure looked to the organizer like a missing person.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+async function geocodeBatch(entries) {
+  digitransitKey();
+  const list = entries || [];
+
+  // Mothers who live at the same address are common and the point of the tool,
+  // so a batch repeats addresses. Each distinct one is looked up once.
+  const inFlight = new Map();
+  const keyFor = (entry) => typeof entry === 'string'
+    ? entry
+    : `${entry?.street || ''}|${entry?.neighborhood || ''}`;
+
+  return mapWithConcurrency(list, GEOCODE_CONCURRENCY, async (entry) => {
+    const key = keyFor(entry);
+    if (!inFlight.has(key)) inFlight.set(key, geocodeOne(entry));
+    try {
+      return await inFlight.get(key);
+    } catch (err) {
+      const rawStreet    = typeof entry === 'string' ? entry : (entry?.street || '');
+      const neighborhood = typeof entry === 'string' ? ''    : (entry?.neighborhood || '');
+      return { street: rawStreet, neighborhood, precise: false, error: err.message };
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------

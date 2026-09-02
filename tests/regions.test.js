@@ -161,3 +161,161 @@ test("normalizeStreet: numbered and ordinal street names survive", () => {
   assert.equal(Regions.normalizeStreet("3. linja 5 as 2"), "3. linja 5");
   assert.equal(Regions.streetNameMatches("Kolmas linja 5", "Kolmas linja 7, Helsinki"), true);
 });
+
+// ---------------------------------------------------------------------------
+// Candidate verification: the logic that replaced the Uusimaa radius check.
+// These are the cases Lisa hit when the tool was pointed at Tampere.
+// ---------------------------------------------------------------------------
+
+// A Pelias feature reduced to the fields that say where a hit actually is.
+function candidate(label, fields = {}) {
+  return {
+    lat: fields.lat ?? 61.4978, lon: fields.lon ?? 23.7610,
+    label,
+    localadmin: fields.localadmin ?? null,
+    locality: fields.locality ?? null,
+    neighbourhood: fields.neighbourhood ?? null,
+    borough: fields.borough ?? null,
+    confidence: fields.confidence ?? 0.9,
+  };
+}
+
+test("pickBestCandidate: the same street in another city is rejected", () => {
+  // Hämeenkatu exists in Tampere, Turku and Hyvinkää. Asking for the Tampere
+  // one must not accept the Hyvinkää one, however confident the geocoder is.
+  const hyvinkaa = candidate("Hämeenkatu 12, Hyvinkää", { localadmin: "Hyvinkää", confidence: 1 });
+  const tampere  = candidate("Hämeenkatu 12, Tampere",  { localadmin: "Tampere", confidence: 0.8 });
+
+  const request = { street: "Hämeenkatu 12", area: "Tampere", municipality: "Tampere" };
+  assert.equal(Regions.scoreCandidate(request, hyvinkaa), null);
+  assert.equal(Regions.pickBestCandidate(request, [hyvinkaa, tampere]).label, "Hämeenkatu 12, Tampere");
+});
+
+test("pickBestCandidate: a fuzzy street match inside the right city is still rejected", () => {
+  // The original Tampere failure: the geocoder answered Hirvikummuntie with
+  // Hirvikatu, a real street in the right municipality.
+  const request = { street: "Hirvikummuntie 5", area: "Tampere", municipality: "Tampere" };
+  const wrongStreet = candidate("Hirvikatu 5, Tampere", { localadmin: "Tampere", confidence: 0.94 });
+  assert.equal(Regions.pickBestCandidate(request, [wrongStreet]), null);
+});
+
+test("pickBestCandidate: the postal town does not stand in for the municipality", () => {
+  // Parts of Kangasala carry a Tampere postal town, so `locality` says Tampere
+  // while `localadmin` (the municipality proper) says Kangasala. Trusting
+  // locality put Kangasala addresses on the map as Tampere.
+  const kangasala = candidate("Holvastintie 6, Kangasala", { localadmin: "Kangasala", locality: "Tampere" });
+  const request = { street: "Holvastintie 6", area: "Linnainmaa", municipality: "Tampere" };
+  assert.equal(Regions.pickBestCandidate(request, [kangasala]), null);
+
+  // Asked for Kangasala, the very same hit is correct.
+  const asked = { street: "Holvastintie 6", area: "Kangasala", municipality: "Kangasala" };
+  assert.ok(Regions.pickBestCandidate(asked, [kangasala]));
+});
+
+test("pickBestCandidate: a district with no known municipality verifies on its own name", () => {
+  // "Hervanta" is not in every table and is not a municipality, but the hit
+  // carries it as a neighbourhood, which is evidence enough.
+  const request = { street: "Insinöörinkatu 60", area: "Hervanta", municipality: null };
+  const right = candidate("Insinöörinkatu 60, Tampere", { localadmin: "Tampere", neighbourhood: "Hervanta" });
+  const wrong = candidate("Insinöörinkatu 16, Helsinki", { localadmin: "Helsinki", neighbourhood: "Herttoniemi" });
+  assert.equal(Regions.pickBestCandidate(request, [wrong]), null);
+  assert.equal(Regions.pickBestCandidate(request, [right, wrong]).label, "Insinöörinkatu 60, Tampere");
+});
+
+test("pickBestCandidate: nothing to verify against means no answer, not a guess", () => {
+  const nowhere = candidate("Hämeenkatu 12, Hyvinkää", { localadmin: "Hyvinkää" });
+  assert.equal(Regions.pickBestCandidate({ street: "Hämeenkatu 12", area: "", municipality: null }, [nowhere]), null);
+});
+
+test("pickBestCandidate: the closest house number on the right street wins", () => {
+  // Pelias ranks by text similarity, so it offered house 9 for a request for
+  // 59: the right street, 700m away. House number has to beat its ranking.
+  const request = { street: "Munkkiniemen puistotie 59", area: "Munkkiniemi", municipality: "Helsinki" };
+  const nine = candidate("Munkkiniemen puistotie 9, Helsinki",  { localadmin: "Helsinki", confidence: 0.96, lat: 60.1970, lon: 24.8750 });
+  const fifty = candidate("Munkkiniemen puistotie 57, Helsinki", { localadmin: "Helsinki", confidence: 0.90, lat: 60.1970, lon: 24.8750 });
+  assert.equal(Regions.pickBestCandidate(request, [nine, fifty]).label, "Munkkiniemen puistotie 57, Helsinki");
+});
+
+test("pickBestCandidate: an exact house number reports itself as exact", () => {
+  const request = { street: "Hämeenkatu 12", area: "Tampere", municipality: "Tampere" };
+  const best = Regions.pickBestCandidate(request, [candidate("Hämeenkatu 12, Tampere", { localadmin: "Tampere" })]);
+  assert.equal(best.exactHouseNumber, true);
+  assert.equal(best.houseDelta, 0);
+});
+
+test("pickBestCandidate: a coordinate outside Finland is never believed", () => {
+  const request = { street: "Hämeenkatu 12", area: "Tampere", municipality: "Tampere" };
+  const abroad = candidate("Hämeenkatu 12, Tampere", { localadmin: "Tampere", lat: 52.5, lon: 13.4 });
+  assert.equal(Regions.pickBestCandidate(request, [abroad]), null);
+});
+
+test("municipalityOf: a district resolves to its city, an unknown place to null", () => {
+  assert.equal(Regions.municipalityOf("Hervanta"), "Tampere");
+  assert.equal(Regions.municipalityOf("Kaleva"), "Tampere");
+  assert.equal(Regions.municipalityOf("Kallio"), "Helsinki");
+  assert.equal(Regions.municipalityOf("Tapiola"), "Espoo");
+  assert.equal(Regions.municipalityOf("Kangasala"), "Kangasala");
+  assert.equal(Regions.municipalityOf("Atlantis"), null);
+});
+
+test("placeNameMatches: diacritics typed away still match", () => {
+  assert.equal(Regions.placeNameMatches("Ylojarvi", "Ylöjärvi"), true);
+  assert.equal(Regions.placeNameMatches("TAMPERE", "Tampere"), true);
+  assert.equal(Regions.placeNameMatches("Tampere", "Kangasala"), false);
+  assert.equal(Regions.placeNameMatches("Tampere", null), false);
+});
+
+test("houseNumber: reads the house number, not a number in the street name", () => {
+  assert.equal(Regions.houseNumber("Hämeenkatu 12"), 12);
+  assert.equal(Regions.houseNumber("3. linja 5"), 5);
+  assert.equal(Regions.houseNumber("Hämeenkatu 12, Tampere"), 12);
+  assert.equal(Regions.houseNumber("Hämeenkatu"), null);
+});
+
+test("the geocoder is never constrained to one region", () => {
+  // The bug that put Tampere applicants in Helsinki was a Uusimaa-shaped
+  // bounding box handed to the geocoder as a hard filter. The only bounds this
+  // module may expose are national.
+  assert.equal(Regions.REGION_BOUNDS, undefined);
+  assert.ok(Regions.COUNTRY_BOUNDS.maxLat > 69, "must reach Lapland");
+  assert.ok(Regions.withinCountry([61.4978, 23.7610]), "Tampere is in Finland");
+  assert.ok(Regions.withinCountry([65.0121, 25.4651]), "Oulu is in Finland");
+  assert.equal(Regions.withinCountry([59.4370, 24.7536]), false, "Tallinn is not");
+});
+
+test("the sample dataset spans more than one municipality", () => {
+  // Guards the assumption this whole change was about: the tool is no longer
+  // a Helsinki-region tool, and a sample that only covers Uusimaa would let
+  // the regression back in unnoticed.
+  const fs = require("fs");
+  const path = require("path");
+  const csv = fs.readFileSync(path.join(__dirname, "..", "mock-applicants.csv"), "utf8");
+  const rows = csv.trim().split(/\r?\n/).map((l) => l.split(","));
+  const idx = rows[0].indexOf("Neighbourhood");
+  const cities = new Set(rows.slice(1)
+    .map((r) => Regions.municipalityOf((r[idx] || "").trim()))
+    .filter(Boolean));
+  assert.ok(cities.size >= 10, `sample covers only ${cities.size} municipalities: ${[...cities].join(", ")}`);
+  assert.ok(cities.has("Tampere"), "Tampere is the region this was reported from");
+  assert.ok(cities.has("Helsinki"), "the original region must stay covered");
+});
+
+test("streetNameMatches: a renamed street matches its former name in brackets", () => {
+  // The address register keeps the old name alongside the new one, and a
+  // resident who writes the old one is not wrong. Refusing this dropped a
+  // real applicant off the map.
+  assert.equal(
+    Regions.streetNameMatches("Latokartanontie 12", "Vanha Helsingintie 11 (Latokartanontie 11), Helsinki"),
+    true
+  );
+  // The current name still matches too.
+  assert.equal(
+    Regions.streetNameMatches("Vanha Helsingintie 11", "Vanha Helsingintie 11 (Latokartanontie 11), Helsinki"),
+    true
+  );
+  // And an unrelated street in brackets is still not a match.
+  assert.equal(
+    Regions.streetNameMatches("Sellonkuja 4", "Vanha Helsingintie 11 (Latokartanontie 11), Helsinki"),
+    false
+  );
+});

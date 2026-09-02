@@ -26,7 +26,6 @@ const path = require("path");
 const Validation = require("./src/validation.js");
 const MatchingEngine = require("./src/matching-engine.js");
 const Regions = require("./src/regions.js");
-const NEIGHBORHOOD_COORDS = Regions.DISTRICT_COORDS;
 
 // ---------------------------------------------------------------------------
 // Argument parsing — detect mode from the first argument
@@ -137,16 +136,26 @@ function fakeGeocode(entries) {
       return { street: rawStreet, neighborhood, queried: street, precise: false, error: "district not recognised" };
     }
     const h = stableHash(street + "|" + anchor.name);
+    // Every fourth address lands on a neighbour's coordinates, so the map's
+    // shared-pin handling gets exercised offline. People at one address were
+    // invisible under each other in production and no local run showed it.
+    const collide = h % 4 === 0;
+    const jitterLat = collide ? 0 : (((h % 1000) / 1000) - 0.5) * 0.01;
+    const jitterLon = collide ? 0 : ((((h >> 10) % 1000) / 1000) - 0.5) * 0.02;
     return {
       street: rawStreet,
       neighborhood,
       queried: street,
-      lat: anchor.coords[0] + (((h % 1000) / 1000) - 0.5) * 0.01,
-      lon: anchor.coords[1] + ((((h >> 10) % 1000) / 1000) - 0.5) * 0.02,
-      label: `${street}, ${anchor.name}`,
-      town: anchor.name,
+      lat: anchor.coords[0] + jitterLat,
+      lon: anchor.coords[1] + jitterLon,
+      label: `${street}, ${anchor.municipality || anchor.name}`,
+      town: anchor.municipality || anchor.name,
+      district: anchor.kind === "district" ? anchor.name : null,
+      municipality: anchor.municipality || anchor.name,
       confidence: 0.95,
       precise: true,
+      precision: "exact",
+      houseDelta: 0,
       _fake: true,
     };
   });
