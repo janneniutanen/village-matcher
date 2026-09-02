@@ -70,6 +70,17 @@ function parseLanguages(raw) {
   return result;
 }
 
+// A rolling application means "youngest child" could occasionally be a couple
+// of years old by the time a group forms, so the backward window is generous.
+const DOB_MAX_YEARS_PAST = 5;
+
+// Expecting mothers are matched on purpose: the point of a village is to be in
+// place before the birth, when it is needed most and there is least energy to
+// go looking for one. So the date in this column is a due date as often as a
+// birthday, and ten months covers a full pregnancy from the earliest a due
+// date is known, while still catching a fat-finger year typo like "2205".
+const DOB_MAX_MONTHS_AHEAD = 10;
+
 // Accepts a JS Date, ISO "YYYY-MM-DD", "DD.MM.YYYY", or "DD/MM/YYYY". Returns a Date or null.
 // Note: both dot- and slash-separated formats are treated as DD/MM/YYYY
 // (Finnish convention), not MM/DD/YYYY (US convention).
@@ -98,15 +109,24 @@ function parseDob(raw) {
   }
   if (!d || isNaN(d.getTime())) return null;
 
-  // Sanity range: catches fat-finger year typos (e.g. "2205") without being
-  // strict about exact cutoffs — a rolling application means "youngest
-  // child" could occasionally be a couple of years old.
+  // Sanity range only; it is not trying to be strict about exact cutoffs,
+  // just to reject a date nobody could have meant.
   const now = new Date();
-  const fiveYearsAgo = new Date(now.getFullYear() - 5, now.getMonth(), now.getDate());
-  const twoMonthsAhead = new Date(now.getFullYear(), now.getMonth() + 2, now.getDate());
-  if (d < fiveYearsAgo || d > twoMonthsAhead) return null;
+  const earliest = new Date(now.getFullYear() - DOB_MAX_YEARS_PAST, now.getMonth(), now.getDate());
+  const latest   = new Date(now.getFullYear(), now.getMonth() + DOB_MAX_MONTHS_AHEAD, now.getDate());
+  if (d < earliest || d > latest) return null;
 
   return d;
+}
+
+// True when the date is still ahead of us, i.e. a due date rather than a
+// birthday. The matching engine needs no special case for this, since it compares
+// months between members, and two due dates a month apart are a month apart
+// exactly like two birthdays. But a coordinator writing to someone does need
+// to know, so it is surfaced rather than left implicit in the date.
+function isExpecting(dob, now = new Date()) {
+  if (!(dob instanceof Date) || isNaN(dob.getTime())) return false;
+  return dob.getTime() > now.getTime();
 }
 
 // Nobody is realistically travelling more than three hours to a peer-support
@@ -226,6 +246,7 @@ function normalizeApplicant(raw) {
     language,
     maxTravel,
     dob,
+    expecting: isExpecting(dob),
     phone: phone || "",
     hasDataIssues: errors.length > 0,
     dataIssues: errors,
@@ -245,6 +266,9 @@ const Validation = {
   parseTransport,
   parseLanguages,
   parseDob,
+  isExpecting,
+  DOB_MAX_YEARS_PAST,
+  DOB_MAX_MONTHS_AHEAD,
   parseMaxTravel,
   travelTextToMinutes,
   MAX_TRAVEL_MINUTES,
