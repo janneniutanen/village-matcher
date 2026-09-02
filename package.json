@@ -2,7 +2,7 @@
   "name": "village-matcher",
   "version": "1.0.0",
   "private": true,
-  "description": "Support-group matching tool for new mothers in Helsinki",
+  "description": "Support-group matching tool for new mothers in Finland",
   "scripts": {
     "test": "node --test tests/matching-engine.test.js tests/validation.test.js tests/regions.test.js tests/e2e.test.js",
     "test:ui": "node --test tests/ui-smoke.test.js",
