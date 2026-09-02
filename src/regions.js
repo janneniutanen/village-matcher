@@ -401,19 +401,33 @@ function labelStreetNames(resolvedLabel) {
   return names.filter(Boolean);
 }
 
+// "Vaasank." is a normal way to write Vaasankatu. An abbreviation is visible
+// in the text: a letter followed by a full stop. The digit case ("3. linja")
+// is an ordinal street name, not a truncation, so it is excluded.
+function looksAbbreviated(street) {
+  return /[a-zäöå]\./i.test(String(street || ""));
+}
+
 function streetNameMatches(requested, resolvedLabel) {
-  const want = streetName(normalizeStreet(requested));
+  const cleaned = normalizeStreet(requested);
+  const want    = streetName(cleaned);
   if (want === "") return false;
+
+  // Prefix leniency is only extended to a request that is visibly an
+  // abbreviation. It used to apply to any pair sharing a five-character stem
+  // in either direction, which in a country full of compound street names
+  // accepted outright different streets: "Kauppatori 5" matched
+  // "Kauppatorinkatu 5", "Rantatie 10" matched "Rantatiensuu 10". Those are
+  // wrong pins in the right city, which is the failure this module exists to
+  // stop. Raised in review; the previous rule was never exercised by a real
+  // address in either the sample or the live sheet.
+  const abbreviated = looksAbbreviated(cleaned);
 
   return labelStreetNames(resolvedLabel).some((got) => {
     if (want === got) return true;
-
-    // "Vaasank. 5" is a normal way to write Vaasankatu, and the geocoder
-    // expands it correctly, so an abbreviated request may match the full name
-    // by prefix. Requiring five characters keeps this from accepting unrelated
-    // streets: "Elonkuja" is still not a prefix of "Sellonkuja".
-    const [shorter, longer] = want.length <= got.length ? [want, got] : [got, want];
-    return shorter.length >= 5 && longer.startsWith(shorter);
+    // One direction only: the address register spells names out in full, so
+    // it is always the request that may be the truncated one.
+    return abbreviated && want.length >= 5 && got.startsWith(want);
   });
 }
 
@@ -454,16 +468,23 @@ function scoreCandidate(request, candidate) {
 
   const areaFields = [candidate.neighbourhood, candidate.borough, candidate.locality, candidate.localadmin];
   // `localadmin` is the municipality proper; `locality` is the postal town,
-  // which is NOT the same thing and must not stand in for it while it exists.
-  // Parts of Kangasala have a Tampere postal town, so accepting either field
-  // let a Kangasala street verify as Tampere, the exact class of error this
-  // whole module exists to prevent.
-  const cityField = candidate.localadmin || candidate.locality;
+  // which is NOT the same thing. Parts of Kangasala have a Tampere postal
+  // town, so accepting either field let a Kangasala street verify as Tampere,
+  // the exact class of error this whole module exists to prevent.
+  //
+  // So `locality` is never consulted for the municipality check, not even
+  // when `localadmin` is missing. Falling back to it in that case would
+  // quietly reopen the same hole for whichever hits happen to lack the field.
+  // Digitransit populates `localadmin` on every Finnish address and street
+  // feature observed, so this costs nothing in practice; if a feature ever
+  // arrives without it, the hit drops to the area-name check below rather
+  // than being verified against the wrong kind of place.
+  const cityField = candidate.localadmin;
   const reasons = [];
 
   // The municipality is the disambiguator. When we know it, a hit in a
   // different municipality is wrong however good its street match looks.
-  if (municipality) {
+  if (municipality && cityField) {
     if (!placeNameMatches(municipality, cityField)) return null;
     reasons.push(`in ${municipality}`);
   } else if (area) {
@@ -544,6 +565,7 @@ const Regions = {
   withinAnchor,
   withinCountry,
   streetName,
+  looksAbbreviated,
   labelStreetNames,
   streetNameMatches,
   houseNumber,

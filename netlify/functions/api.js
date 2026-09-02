@@ -409,6 +409,15 @@ const GEOCODE_CONCURRENCY = 6;
 // large. Requests are spaced globally rather than per worker, so the ceiling
 // holds however many workers are running.
 const MIN_REQUEST_SPACING_MS = 110;
+
+// A Netlify function gets about 10 seconds per synchronous invocation, and
+// being killed at the limit returns nothing at all: the whole chunk fails with
+// an opaque gateway error and the organizer sees people vanish from the map
+// with no reason given. So the batch stops starting new addresses shortly
+// before that, and reports the ones it did not reach as retryable. The
+// frontend already keeps batches small (GEOCODE_CHUNK_SIZE); this is the
+// backstop for a chunk that turns out slower than expected.
+const GEOCODE_TIME_BUDGET_MS = 8000;
 let _nextRequestSlot = 0;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -492,8 +501,16 @@ async function resolveMunicipalityName(name) {
   } catch (err) {
     // A lookup failure must not decide the address's fate; verification just
     // falls back to matching the area name against the hit's own fields.
-    resolved = null;
+    //
+    // Deliberately NOT cached. "Tampere is not a municipality" and "the
+    // network blipped while asking about Tampere" are indistinguishable here,
+    // and this cache lives as long as the warm container: caching the second
+    // would degrade every remaining applicant in the batch, and every future
+    // batch on the same container, to the weaker check for no reason.
+    return null;
   }
+  // Only a definitive answer is cached: a name either is a municipality or
+  // demonstrably isn't, and neither changes.
   _municipalityCache.set(key, resolved);
   return resolved;
 }
@@ -694,14 +711,27 @@ async function geocodeBatch(entries) {
     ? entry
     : `${entry?.street || ''}|${entry?.neighborhood || ''}`;
 
+  const deadline = Date.now() + GEOCODE_TIME_BUDGET_MS;
+
   return mapWithConcurrency(list, GEOCODE_CONCURRENCY, async (entry) => {
+    const rawStreet    = typeof entry === 'string' ? entry : (entry?.street || '');
+    const neighborhood = typeof entry === 'string' ? ''    : (entry?.neighborhood || '');
+
+    // Out of time. Reported as retryable rather than "not found", because the
+    // address is probably fine and saying otherwise would send the organizer
+    // hunting for a typo that isn't there.
+    if (Date.now() >= deadline) {
+      return {
+        street: rawStreet, neighborhood, precise: false, retryable: true,
+        error: 'Not looked up yet: the batch ran out of time. Sync again to finish placing this one.',
+      };
+    }
+
     const key = keyFor(entry);
     if (!inFlight.has(key)) inFlight.set(key, geocodeOne(entry));
     try {
       return await inFlight.get(key);
     } catch (err) {
-      const rawStreet    = typeof entry === 'string' ? entry : (entry?.street || '');
-      const neighborhood = typeof entry === 'string' ? ''    : (entry?.neighborhood || '');
       return { street: rawStreet, neighborhood, precise: false, error: err.message };
     }
   });

@@ -319,3 +319,54 @@ test("streetNameMatches: a renamed street matches its former name in brackets", 
     false
   );
 });
+
+test("pickBestCandidate: a hit with no municipality field is not verified against the postal town", () => {
+  // Raised in review: the municipality check used to read
+  // `localadmin || locality`, so a hit missing `localadmin` fell back to the
+  // postal town, quietly reopening the Kangasala-as-Tampere hole for that
+  // subset of hits. A hit with only a postal town must not satisfy a
+  // municipality requirement.
+  const postalOnly = candidate("Holvastintie 6, Kangasala", { localadmin: null, locality: "Tampere" });
+  const request = { street: "Holvastintie 6", area: "Linnainmaa", municipality: "Tampere" };
+  assert.equal(Regions.pickBestCandidate(request, [postalOnly]), null);
+});
+
+test("pickBestCandidate: a hit with no municipality field can still match on its area name", () => {
+  // Degrading to the weaker area-name check is the intended behaviour, rather
+  // than refusing outright, so a sparse feature doesn't drop someone off the
+  // map. The district name has to appear on the hit for this to pass.
+  const sparse = candidate("Insinöörinkatu 60, Tampere", { localadmin: null, neighbourhood: "Hervanta" });
+  const matching = { street: "Insinöörinkatu 60", area: "Hervanta", municipality: "Tampere" };
+  assert.ok(Regions.pickBestCandidate(matching, [sparse]), "the area name on the hit is evidence enough");
+
+  const mismatching = { street: "Insinöörinkatu 60", area: "Kaleva", municipality: "Tampere" };
+  assert.equal(Regions.pickBestCandidate(mismatching, [sparse]), null, "a different district is not evidence");
+});
+
+test("streetNameMatches: prefix leniency does not accept a different compound street", () => {
+  // Raised in review. Finnish street names compound heavily, and the old
+  // five-character-stem rule accepted outright different streets in the right
+  // city, which is the failure this module exists to stop.
+  assert.equal(Regions.streetNameMatches("Kauppatori 5", "Kauppatorinkatu 5, Turku"), false);
+  assert.equal(Regions.streetNameMatches("Rantatie 10", "Rantatiensuu 10, Nokia"), false);
+  assert.equal(Regions.streetNameMatches("Hämeenkatu 12", "Hämeenkatuaukio 12, Tampere"), false);
+  assert.equal(Regions.streetNameMatches("Puistotie 4", "Puistotienhaara 4, Espoo"), false);
+  // The reverse direction too: the register spells names out, so a request
+  // longer than the label is not an abbreviation of it.
+  assert.equal(Regions.streetNameMatches("Kauppatorinkatu 5", "Kauppatori 5, Turku"), false);
+});
+
+test("streetNameMatches: an abbreviation is still expanded", () => {
+  // The case the leniency exists for, which must keep working.
+  assert.equal(Regions.streetNameMatches("Vaasank. 5", "Vaasankatu 5 F, Helsinki"), true);
+  assert.equal(Regions.streetNameMatches("Mannerheimint. 10", "Mannerheimintie 10, Helsinki"), true);
+});
+
+test("looksAbbreviated: a truncation, not an ordinal", () => {
+  assert.equal(Regions.looksAbbreviated("Vaasank. 5"), true);
+  assert.equal(Regions.looksAbbreviated("Vaasankatu 5"), false);
+  // "3. linja" is a real street name in Kallio, not a shortened one, so it
+  // must not earn prefix leniency.
+  assert.equal(Regions.looksAbbreviated("3. linja 5"), false);
+  assert.equal(Regions.looksAbbreviated(""), false);
+});

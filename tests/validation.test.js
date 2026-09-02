@@ -197,7 +197,7 @@ test("normalizeApplicant: missing neighborhood/street/language/dob is fully flag
   };
   const result = Validation.normalizeApplicant(raw);
   assert.equal(result.eligibleForMatching, false);
-  ["neighborhood", "street", "language", "date of birth"].forEach((field) => {
+  ["neighborhood", "street", "language", "due date"].forEach((field) => {
     assert.ok(
       result.dataIssues.some((e) => e.toLowerCase().includes(field)),
       `expected an issue mentioning "${field}"`

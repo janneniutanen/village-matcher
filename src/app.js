@@ -50,6 +50,45 @@ function cacheSet(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage full */ }
 }
 
+// Geocode results are cached in localStorage and never expire, which is right:
+// an address does not move. But it means a coordinate the backend got WRONG is
+// also kept forever, and the browser that reported the wrong-city bug is
+// holding exactly those results. Shipping a geocoder fix without changing this
+// prefix would leave the old pins on her map with no way to tell why.
+//
+// Bump this whenever a change could alter the coordinate a given address
+// resolves to. v2: geocoding stopped being restricted to Uusimaa and started
+// verifying the municipality.
+// How many addresses go in one backend call. Sized against the WORST case, not
+// the typical one: an address that resolves on the first query costs one
+// geocoder request, but one that doesn't exist runs the whole ladder, and a
+// chunk spanning municipalities not yet cached pays a lookup for each. At 15
+// per chunk that combination measured right at the backend's time budget and
+// tripped it for real, so the size is set from the slow path.
+const GEOCODE_CHUNK_SIZE = 10;
+
+const GEOCODE_CACHE_VERSION = 'v2';
+const GEOCODE_CACHE_PREFIX  = `geocode:${GEOCODE_CACHE_VERSION}:`;
+
+function geocodeCacheKey(applicant) {
+  return `${GEOCODE_CACHE_PREFIX}${applicant.street}, ${applicant.neighborhood}`;
+}
+
+// Superseded entries would otherwise sit in localStorage forever, and the
+// store is small enough that filling it with dead keys eventually costs a
+// working cache. Runs once per load.
+function pruneStaleGeocodeCache() {
+  try {
+    const stale = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('geocode:') && !key.startsWith(GEOCODE_CACHE_PREFIX)) stale.push(key);
+    }
+    stale.forEach((key) => localStorage.removeItem(key));
+    if (stale.length) console.info(`Discarded ${stale.length} geocode result(s) from an older version.`);
+  } catch { /* storage unavailable */ }
+}
+
 // Fire-and-forget backend write. Local state is updated immediately so the
 // UI never waits on a network round trip.
 function syncToBackend(action, payload) {
@@ -101,6 +140,9 @@ async function loadFromBackend_() {
         // A placed-but-imperfect match: right street and city, nearest known
         // house number. Usable for matching, still worth the organizer seeing.
         geocodeWarning: prev?.geocodeWarning || null,
+        // 'exact' | 'approximate' | 'street' | 'area'. Drives how the pin is
+        // drawn, so an area-centre guess doesn't look like a rooftop fix.
+        geocodePrecision: prev?.geocodePrecision || null,
       };
     });
     await ensureGeocoded(state.applicants);
@@ -170,50 +212,69 @@ async function ensureGeocoded(applicants) {
 
   const toFetch = [];
   missing.forEach((a) => {
-    const cacheKey = 'geocode:' + a.street + ', ' + a.neighborhood;
-    const cached   = cacheGet(cacheKey);
+    const cached = cacheGet(geocodeCacheKey(a));
     if (cached && typeof cached.lat === 'number') {
       a.coords         = [cached.lat, cached.lon];
       a.geocodedReal   = true;
       a.geocodeLabel   = cached.label || null;
       a.geocodeIssue   = null;
       a.geocodeWarning = cached.warning || null;
+      a.geocodePrecision = cached.precision || 'exact';
     } else {
       toFetch.push(a);
     }
   });
   if (toFetch.length === 0) return;
 
-  try {
-    // Structured, so the backend can anchor the search to the district rather
-    // than hoping the geocoder respects a municipality buried in free text.
-    const addresses = toFetch.map((a) => ({ street: a.street, neighborhood: a.neighborhood }));
-    const results   = await callBackend('geocode', { addresses });
-    results.forEach((r, i) => {
-      const a = toFetch[i];
-      a.geocodeLabel = r.label || null;
-      if (typeof r.lat === 'number' && r.precise) {
-        a.coords         = [r.lat, r.lon];
-        a.geocodedReal   = true;
-        a.geocodeIssue   = null;
-        a.geocodeWarning = r.warning || null;
-        cacheSet('geocode:' + a.street + ', ' + a.neighborhood, r);
-      } else {
-        // Either nothing was found, or the geocoder only managed to place the
-        // address at street/city level. Say which, so the organizer can fix
-        // the row instead of wondering why the pin is in the wrong place.
-        a.coords         = null;
-        a.geocodedReal   = false;
-        a.geocodeWarning = null;
-        a.geocodeIssue   = r.error
-          ? `Address not found: ${r.error}`
-          : `Address only matched loosely${r.label ? ` (got "${r.label}")` : ''} — needs a more exact street address`;
-      }
-    });
-  } catch (err) {
-    console.warn('Geocoding call failed:', err.message);
-    toFetch.forEach((a) => { a.geocodeIssue = `Geocoding unavailable: ${err.message}`; });
+  // Sent in chunks, sequentially. The backend spaces its geocoder requests to
+  // stay under Digitransit's rate limit, so a batch takes time proportional to
+  // its size: 300 applicants measured at roughly 70 seconds. A Netlify
+  // function only gets about 10 seconds per synchronous invocation, so asking
+  // for all of them at once would be killed mid-flight and return nothing.
+  // Raised in review; the 300-row timing above was measured by calling the
+  // handler directly from Node, which has no such limit and hid the problem.
+  //
+  // Chunks are deliberately NOT sent in parallel: each invocation rate-limits
+  // only itself, so concurrent chunks would multiply the request rate and
+  // bring back the throttling this is all working around.
+  for (let start = 0; start < toFetch.length; start += GEOCODE_CHUNK_SIZE) {
+    const chunk = toFetch.slice(start, start + GEOCODE_CHUNK_SIZE);
+    try {
+      // Structured, so the backend can anchor the search to the district rather
+      // than hoping the geocoder respects a municipality buried in free text.
+      const addresses = chunk.map((a) => ({ street: a.street, neighborhood: a.neighborhood }));
+      const results   = await callBackend('geocode', { addresses });
+      results.forEach((r, i) => applyGeocodeResult(chunk[i], r));
+    } catch (err) {
+      // One failed chunk must not abandon the rest: the remaining applicants
+      // are still worth placing, and this one is retryable on the next sync.
+      console.warn(`Geocoding chunk ${start}-${start + chunk.length} failed:`, err.message);
+      chunk.forEach((a) => { a.geocodeIssue = `Geocoding unavailable: ${err.message}`; });
+    }
   }
+}
+
+function applyGeocodeResult(a, r) {
+  a.geocodeLabel = r.label || null;
+  if (typeof r.lat === 'number' && r.precise) {
+    a.coords         = [r.lat, r.lon];
+    a.geocodedReal   = true;
+    a.geocodeIssue   = null;
+    a.geocodeWarning = r.warning || null;
+    a.geocodePrecision = r.precision || 'exact';
+    cacheSet(geocodeCacheKey(a), r);
+    return;
+  }
+
+  // Either nothing was found, or the geocoder only managed to place the
+  // address at street/city level. Say which, so the organizer can fix
+  // the row instead of wondering why the pin is in the wrong place.
+  a.coords         = null;
+  a.geocodedReal   = false;
+  a.geocodeWarning = null;
+  a.geocodeIssue   = r.error
+    ? (r.retryable ? r.error : `Address not found: ${r.error}`)
+    : `Address only matched loosely${r.label ? ` (got "${r.label}")` : ''}, so it needs a more exact street address`;
 }
 
 async function ensureTravelTimes(pairsNeeded) {
@@ -500,13 +561,19 @@ function renderMap() {
     const isMatched  = !!groupColor;
     const shared     = people.length > 1;
 
+    // A pin placed at the centre of a district, because the sheet named a
+    // place rather than an address, is a guess covering a whole neighbourhood.
+    // Drawn hollow and dashed so it doesn't read as a rooftop-accurate fix:
+    // the popup and the "worth checking" list both say so, but neither is
+    // visible while scanning the map. Raised in review.
+    const approximate = people.every((a) => a.geocodePrecision === 'area');
     const marker = L.circleMarker(coords, {
       radius: shared ? 12 : 9,
       color: isMatched ? groupColor : '#8A8577',
       weight: shared ? 3 : 2,
       fillColor: isMatched ? groupColor : '#FAF9F6',
-      fillOpacity: isMatched ? 0.9 : 0.5,
-      dashArray: isMatched ? null : '3,2',
+      fillOpacity: approximate ? 0.15 : (isMatched ? 0.9 : 0.5),
+      dashArray: approximate ? '2,3' : (isMatched ? null : '3,2'),
     }).addTo(pinLayer);
 
     if (shared) {
@@ -1077,6 +1144,9 @@ function wireControls() {
 }
 
 async function init() {
+  // Before anything reads the cache, so a coordinate cached by an older
+  // version of the geocoder can never reach the map.
+  pruneStaleGeocodeCache();
   initMap();
   wireControls();
 

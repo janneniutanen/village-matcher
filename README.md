@@ -225,6 +225,19 @@ result set entirely, so the only candidates left for a Tampere street were
 same-named streets in Uusimaa, so Tampere applicants landed in Helsinki,
 Hyvinkää, Espoo, Salo and Järvenpää. Constrain the answer, not the search.
 
+### The result cache
+
+Geocode results are cached in the browser's `localStorage` and never expire,
+which is right: an address does not move. But it also means a coordinate the
+backend got *wrong* is kept forever, so a geocoder fix does not reach anyone
+who already loaded the old result.
+
+`GEOCODE_CACHE_VERSION` in `src/app.js` is the escape hatch. Bump it whenever a
+change could alter the coordinate an address resolves to; entries under older
+prefixes are discarded on the next load. It went to `v2` with the move off the
+Uusimaa-only geocoder, because the browser that reported the wrong-city bug was
+holding exactly the wrong pins the fix corrects.
+
 ### What the organizer sees
 
 Results are not just found or not found. Under **Needs attention**, blocking
@@ -239,10 +252,34 @@ a glance:
 | street level | the street exists, that house number does not |
 | area level | the street cell held only a place name, so the pin is at the centre of that district |
 
+### Batching and timeouts
+
 Requests are spaced globally and retried on throttling. A 300-applicant sync
-issues roughly 600 geocoder calls; without spacing, around twenty of them came
-back rate-limited, which looked to the organizer like people missing from the
-map for no reason. Repeated addresses within one batch are looked up once.
+issues roughly 600 geocoder calls; without spacing, around twenty came back
+rate-limited, which looked to the organizer like people missing from the map
+for no reason. Repeated addresses within one batch are looked up once.
+
+That spacing means a batch takes time proportional to its size: 300 applicants
+measured at about 65 seconds. A Netlify function gets roughly **10 seconds per
+synchronous invocation**, so the frontend sends addresses in chunks of
+`GEOCODE_CHUNK_SIZE` (10) and waits for each before starting the next. Chunks
+are deliberately sequential: each invocation rate-limits only itself, so
+parallel chunks would multiply the request rate and bring the throttling back.
+
+The chunk size is set from the slow path, not the typical one. An address that
+resolves on the first query costs one geocoder call; one that does not exist
+runs the whole ladder, and a chunk spanning municipalities not yet cached pays
+a lookup for each. Fifteen per chunk measured right at the limit and tripped it
+for real; ten leaves headroom.
+
+`GEOCODE_TIME_BUDGET_MS` is the backstop: the backend stops starting new
+addresses shortly before the invocation would be killed and reports the ones it
+did not reach as retryable, so a slow chunk degrades into "sync again" rather
+than an opaque gateway error that drops ten people off the map.
+
+A caution for anyone measuring this: calling the handler directly from Node has
+no timeout, which is how the original 300-row figure was gathered and how the
+problem stayed hidden. Time it through the chunked path.
 
 ## The map
 

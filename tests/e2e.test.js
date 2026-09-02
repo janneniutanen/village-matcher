@@ -63,6 +63,25 @@ test("unknown action: returns ok:false with a message, doesn't crash the server"
   assert.match(error, /Unknown action/);
 });
 
+test("the sample CSV is well-formed", () => {
+  // A160's street is "Insinöörinkatu 60, 33720 Tampere": a postal code after
+  // a comma, which is exactly the messiness the address cleaner exists for.
+  // Unquoted, that comma is a field separator, and every column after it
+  // shifts by one: the transport cell becomes " 33720 Tampere", the phone
+  // number becomes a language list, and the row turns into an accidental
+  // corrupted case masquerading as a clean one. Caught late, by review, so
+  // the shape of the fixture is now asserted rather than assumed.
+  const fs = require("fs");
+  const path = require("path");
+  const { parseCsv } = require("../local-test-server.js");
+  const rows = parseCsv(fs.readFileSync(path.join(__dirname, "..", "mock-applicants.csv"), "utf8"));
+  const width = rows[0].length;
+  const malformed = rows
+    .map((row, i) => ({ line: i + 1, id: row[0], fields: row.length }))
+    .filter((r) => r.fields !== width);
+  assert.deepEqual(malformed, [], `rows whose field count differs from the ${width}-column header`);
+});
+
 test("getApplicants: loads the CSV, matches expected count and validation split", async () => {
   const { ok, result } = await call("getApplicants");
   assert.equal(ok, true);

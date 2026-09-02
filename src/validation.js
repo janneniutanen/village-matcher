@@ -232,7 +232,10 @@ function normalizeApplicant(raw) {
   if (maxTravel === null) errors.push(`Missing or invalid max travel time: ${invalidValue(raw.maxTravel)}`);
 
   const dob = parseDob(raw.dob);
-  if (dob === null) errors.push(`Missing or invalid date of birth (youngest child): ${invalidValue(raw.dob)}`);
+  // Named as a birth OR due date, since both are accepted and a coordinator
+  // reading "(youngest child)" against an expecting mother's mistyped due
+  // date has no idea what the tool wanted.
+  if (dob === null) errors.push(`Missing or invalid birth date or due date: ${invalidValue(raw.dob)}`);
 
   const phone = normalizePhone(raw.phone);
   if (!isPlausiblePhone(phone)) errors.push(`Missing or invalid phone number: ${invalidValue(raw.phone)}`);

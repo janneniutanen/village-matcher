@@ -175,6 +175,19 @@ button:hover { background: var(--surface-muted); }
 .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: middle; }
 .legend-dot-solid { background: var(--accent); }
 .legend-dot-dashed { border: 2px dashed var(--text-muted); }
+/* Placed at the centre of a district because the sheet named a place rather
+   than an address. Matches the hollow, finely-dashed pin on the map. */
+.legend-dot-faint { border: 2px dashed var(--text-muted); opacity: 0.45; }
+/* A pin holding several people, which carries its count. */
+.legend-dot-count {
+  background: var(--accent);
+  color: #fff;
+  font-size: 8px;
+  font-weight: 700;
+  font-style: normal;
+  line-height: 10px;
+  text-align: center;
+}
 
 .section-title {
   font-family: "Fraunces", serif;

@@ -631,7 +631,12 @@ async function start() {
   });
 }
 
-start().catch((err) => { console.error(err); process.exit(1); });
+// Only when run as a program. This file also exports parseCsv, and binding a
+// port just because someone required it meant a test that wanted the parser
+// got an EADDRINUSE collision with the server it had already spawned.
+if (require.main === module) {
+  start().catch((err) => { console.error(err); process.exit(1); });
+}
 
 // Exported for the smoke tests (CSV mode interface stays the same)
 module.exports = { dispatch, parseCsv };
