@@ -179,6 +179,13 @@ button:hover { background: var(--surface-muted); }
    than an address. Matches the hollow, finely-dashed pin on the map. */
 .legend-dot-faint { border: 2px dashed var(--text-muted); opacity: 0.45; }
 /* A pin holding several people, which carries its count. */
+/* A member of the group whose meeting places are on screen. Dashed ring, to
+   read as a selection rather than as another person. */
+.legend-dot-active {
+  border: 2px dashed var(--accent);
+  background: transparent;
+}
+
 /* A suggested meeting place. Square, so it never reads as one of the round
    pins that mean a person. */
 .legend-dot-meeting {
@@ -380,6 +387,22 @@ button:hover { background: var(--surface-muted); }
   background: var(--surface);
 }
 .applicant-locate { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+
+/* The compact summary on an applicant row: languages, how she travels, how
+   far she will go. */
+.applicant-summary-line { display: inline-flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.applicant-tags { display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.applicant-tags .tag-word {
+  font-size: 11px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.tag-modes { letter-spacing: 1px; }
+.tag-travel { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.applicant-address { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; }
+.id-toggle { font-size: 13.5px; }
 .locate-btn {
   border: none;
   background: transparent;

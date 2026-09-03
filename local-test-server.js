@@ -173,8 +173,54 @@ function fakeTravelTime(pairs) {
     return { id: p.id, minutes: Math.max(1, estimate * (1 + jitter)), _fake: true };
   });
 }
-function fakeIsochrone() {
-  return { type: "FeatureCollection", features: [], _fake: true, note: "local test server stub" };
+// Travel times from several origins to several candidate meeting points, the
+// offline twin of the real batched routing query. Distance- and mode-aware for
+// the same reason fakeTravelTime is: a stub that ignored geography made the
+// ranking of meeting places meaningless when testing locally.
+function fakeTravelTimeGrid(origins, points) {
+  const out = {};
+  (origins || []).forEach((origin) => {
+    out[origin.id] = (points || []).map((point) => {
+      const km = MatchingEngine.haversineKm([origin.lat, origin.lon], [point.lat, point.lon]);
+      const estimate = MatchingEngine.estimateTravelTime(km, origin.mode);
+      if (!isFinite(estimate)) return null;
+      // The real router returns nothing when a journey is not possible, and
+      // that is a hard exclusion downstream, so the stub has to be capable of
+      // saying it too. Walking 20km is the honest case for it.
+      if (origin.mode === "W" && km > 20) return null;
+      const jitter = ((stableHash(origin.id + point.lat) % 21) - 10) / 100; // ±10%
+      return Math.max(1, estimate * (1 + jitter));
+    });
+  });
+  return out;
+}
+
+// Plausible places to meet, laid out around the group so the shortlisting and
+// ranking have something with spread to work on. Named after the real OSM tags
+// they stand in for, and clearly fake so nobody mistakes them for data.
+const FAKE_VENUE_KINDS = ["playground", "park", "community_centre", "mall"];
+
+function fakeMeetingVenues(circle) {
+  if (!circle) return [];
+  const radiusDeg = (circle.radiusKm || 10) / 111.32;
+  const venues = [];
+  // A ring of venues at a couple of distances, cycling through the kinds, so
+  // the round-robin shortlist and the separation rule both get exercised.
+  [0.35, 0.7].forEach((scale, band) => {
+    for (let i = 0; i < 8; i++) {
+      const angle = (i / 8) * 2 * Math.PI + band * 0.4;
+      const kind = FAKE_VENUE_KINDS[(i + band) % FAKE_VENUE_KINDS.length];
+      venues.push({
+        id: `fake/${band}/${i}`,
+        name: `Test ${kind.replace("_", " ")} ${band * 8 + i + 1}`,
+        kind,
+        lat: circle.lat + Math.sin(angle) * radiusDeg * scale,
+        lon: circle.lon + Math.cos(angle) * radiusDeg * scale * 2,
+        _fake: true,
+      });
+    }
+  });
+  return venues;
 }
 
 // ---------------------------------------------------------------------------
@@ -530,7 +576,8 @@ async function dispatch(body) {
   if (action === "ping")       return { time: new Date().toISOString(), server: "local-test-server" + (isSheetMode ? " (Sheets API)" : " (CSV)") };
   if (action === "geocode")    return fakeGeocode(body.addresses);
   if (action === "travelTime") return fakeTravelTime(body.pairs);
-  if (action === "isochrone")  return fakeIsochrone();
+  if (action === "travelTimeGrid")  return fakeTravelTimeGrid(body.origins, body.points);
+  if (action === "meetingVenues")   return fakeMeetingVenues(body.circle);
 
   if (isSheetMode) {
     switch (action) {

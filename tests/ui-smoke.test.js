@@ -79,12 +79,23 @@ function fakeLeaflet(record) {
     },
     circle: () => chainable(),
     geoJSON: () => chainable(),
+    rectangle: () => chainable(),
+    polyline: (points, opts) => { record.polylines.push({ points, opts }); return chainable(); },
+    divIcon: (opts) => { record.divIcons.push(opts); return opts; },
+    marker: (coords, opts) => {
+      const m = chainable({ coords, opts });
+      record.meetingMarkers.push(m);
+      return m;
+    },
     latLngBounds: (coords) => { record.bounds.push(coords); return { coords }; },
   };
 }
 
 function newLeafletRecord() {
-  return { markers: [], tooltips: [], setViews: [], fitBounds: [], bounds: [], openedPopups: [] };
+  return {
+    markers: [], tooltips: [], setViews: [], fitBounds: [], bounds: [], openedPopups: [],
+    polylines: [], divIcons: [], meetingMarkers: [],
+  };
 }
 
 // Builds a jsdom window with the real markup + real scripts evaluated in
@@ -119,7 +130,12 @@ function buildWindow() {
   window.navigator.clipboard = { writeText: async () => {} };
   window.localStorage.setItem("matcherPassword", "test");
 
-  const files = ["src/matching-engine.js", "src/validation.js", "src/app.js"];
+  // Read from index.html rather than listed here, so adding a script to the
+  // page cannot leave these tests loading a different set. reachability.js was
+  // added to the page and not to this list, and every meeting-point test
+  // failed with "Reachability is not defined" for no visible reason.
+  const files = [...rawHtml.matchAll(/<script src="(src\/[^"]+)"><\/script>/g)].map((m) => m[1]);
+  assert.ok(files.length >= 3, `expected the app's scripts in index.html, got ${files.join(", ")}`);
   files.forEach((f) => {
     const script = window.document.createElement("script");
     script.textContent = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
@@ -139,6 +155,7 @@ function buildWindow() {
     getApplicant, renderCandidateCards, renderAll, waLink, syncToBackend, init,
     populateNeighborhoodFilter, renderSettingsTab,
     renderMap, groupApplicantsByLocation, focusApplicantOnMap, selectApplicantOnMap,
+    drawOverlap, travelMode,
   };`;
   window.document.body.appendChild(hook);
 
@@ -460,7 +477,7 @@ test("UI smoke: people at the same address share one pin, labelled with the coun
 
   // The Leaflet stub's clearLayers is a no-op, so the record holds every
   // render init did. Start clean and draw once.
-  Object.assign(window.__leaflet__, { markers: [], tooltips: [], setViews: [], fitBounds: [], bounds: [], openedPopups: [] });
+  Object.assign(window.__leaflet__, newLeafletRecord());
   window.__test__.renderMap();
 
   assert.ok(shared.length > 0, "the sample must contain people sharing an address");
@@ -559,7 +576,7 @@ test("UI smoke: the highlight survives a re-render", async () => {
   // Approving a group or running matching re-renders the map, which clears
   // every layer. The ring has to come back, or it disappears the moment
   // anything else on the page changes.
-  Object.assign(window.__leaflet__, { markers: [], tooltips: [], setViews: [], fitBounds: [], bounds: [], openedPopups: [] });
+  Object.assign(window.__leaflet__, newLeafletRecord());
   window.__test__.renderMap();
 
   const ring = window.__leaflet__.markers.find((m) => m.opts && m.opts.fill === false);
@@ -622,4 +639,109 @@ test("UI smoke: the browser scripts declare no colliding globals", () => {
     [...a].filter((n) => b.has(n)).forEach((n) => collisions.push(`${n} in both ${fileA} and ${fileB}`));
   }));
   assert.deepEqual(collisions, []);
+});
+
+// ---------------------------------------------------------------------------
+// Meeting points. Everyone in the pool is on the map, so showing where one
+// group should meet has to pick that group out and zoom to it.
+// ---------------------------------------------------------------------------
+
+async function showFirstGroup(window) {
+  const groups = await window.__test__.computeCandidateGroups();
+  assert.ok(groups.length, 'the sample must produce at least one candidate group');
+  // The app assigns this in the Run matching handler.
+  window.__test__.state.candidateGroups = groups;
+  Object.assign(window.__leaflet__, newLeafletRecord());
+  await window.__test__.drawOverlap(groups[0].candidateId);
+  return groups[0];
+}
+
+test("UI smoke: suggesting a meeting place draws options and journey lines", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const group = await showFirstGroup(window);
+
+  const members = group.memberIds.map(window.__test__.getApplicant);
+  const status = window.document.getElementById('overlapStatus').textContent;
+  assert.ok(window.__leaflet__.divIcons.length > 0,
+    `expected at least one suggested place; status was ${JSON.stringify(status)}`);
+  assert.ok(window.__leaflet__.divIcons.some((i) => /meeting-marker-best/.test(i.className)),
+    'the best option must be marked as such');
+
+  // One journey line from every member to every option, so it is visible who
+  // travels furthest rather than only where the meeting is. Each is drawn
+  // twice, a pale casing under a coloured line, to stay legible over the
+  // basemap, so count the coloured ones.
+  const coloured = window.__leaflet__.polylines.filter((l) => l.opts.color !== '#FFFFFF');
+  const casings  = window.__leaflet__.polylines.filter((l) => l.opts.color === '#FFFFFF');
+  const expected = members.length * window.__leaflet__.divIcons.length;
+  assert.equal(coloured.length, expected, 'one coloured line per member per option');
+  assert.equal(casings.length, expected, 'and a casing under each of them');
+  casings.forEach((c) => assert.ok(c.opts.weight > 3, 'a casing must be wider than the line it backs'));
+
+  assert.match(window.document.getElementById('overlapStatus').textContent, /Best of|No shared meeting place/);
+});
+
+test("UI smoke: the members of the group being shown are ringed", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const group = await showFirstGroup(window);
+  const members = group.memberIds.map(window.__test__.getApplicant).filter((m) => m.coords);
+
+  // Dashed, unfilled rings: one per member, so the group is picked out of the
+  // rest of the pool rather than being lines reaching into a crowd of dots.
+  const rings = window.__leaflet__.markers.filter(
+    (m) => m.opts && m.opts.fill === false && m.opts.dashArray
+  );
+  assert.equal(rings.length, members.length, 'one ring per member of the shown group');
+
+  // And they sit on the members, not somewhere else.
+  // Joined, because arrays produced inside the jsdom realm are not
+  // reference-equal to arrays built here even when their contents match.
+  const ringKeys = rings.map((r) => `${r.coords[0]},${r.coords[1]}`).sort().join(' ');
+  const memberKeys = members.map((m) => `${m.coords[0]},${m.coords[1]}`).sort().join(' ');
+  assert.equal(ringKeys, memberKeys);
+});
+
+test("UI smoke: the map zooms to the group, not the whole country", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+
+  // The pool-wide framing from init, captured before showFirstGroup resets
+  // the record.
+  const poolBounds = window.__leaflet__.bounds[0];
+  const poolSpan = Math.max(...poolBounds.map((c) => c[0])) - Math.min(...poolBounds.map((c) => c[0]));
+
+  const group = await showFirstGroup(window);
+  const members = group.memberIds.map(window.__test__.getApplicant).filter((m) => m.coords);
+
+  assert.equal(window.__leaflet__.fitBounds.length, 1, 'showing a group must reframe the map once');
+
+  // The framing covers every member, so nobody in the group is off-screen.
+  const framed = window.__leaflet__.bounds[window.__leaflet__.bounds.length - 1];
+  const lats = framed.map((c) => c[0]);
+  const lons = framed.map((c) => c[1]);
+  members.forEach((m) => {
+    assert.ok(m.coords[0] >= Math.min(...lats) && m.coords[0] <= Math.max(...lats),
+      `${m.id} is outside the framed latitudes`);
+    assert.ok(m.coords[1] >= Math.min(...lons) && m.coords[1] <= Math.max(...lons),
+      `${m.id} is outside the framed longitudes`);
+  });
+
+  // Tighter than the pool-wide view: the sample spans the country, one group
+  // does not, and leaving the map framed over everyone is what made the
+  // meeting markers a few indistinguishable pixels.
+  assert.ok(Math.max(...lats) - Math.min(...lats) < poolSpan,
+    'a group must frame tighter than the whole pool');
+});
+
+test("UI smoke: toggling the suggestions off clears the rings and the status", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  await showFirstGroup(window);
+  assert.notEqual(window.document.getElementById('overlapStatus').textContent, '');
+
+  await window.__test__.drawOverlap(null);
+  assert.equal(window.document.getElementById('overlapStatus').textContent, '',
+    'a stale status line would describe markers that are gone');
 });

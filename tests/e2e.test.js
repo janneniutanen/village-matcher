@@ -227,7 +227,7 @@ test("representativeDeparture: always a future weekday morning, never cached", (
   assert.equal(api.representativeDeparture(), iso);
 });
 
-test("geocode / travelTime / isochrone stubs respond in the shape the front end expects", async () => {
+test("geocode / travelTime / meeting-place stubs respond in the shape the front end expects", async () => {
   // The frontend sends structured entries so the backend can anchor the search
   // to the district; results must carry `precise` either way.
   const geo = await call("geocode", { addresses: [{ street: "Vaasankatu 5", neighborhood: "Kallio" }] });
@@ -247,6 +247,30 @@ test("geocode / travelTime / isochrone stubs respond in the shape the front end 
   assert.equal(travel.ok, true);
   assert.equal(typeof travel.result[0].minutes, "number");
 
-  const iso = await call("isochrone", { locations: [{ lat: 60.18, lon: 24.95 }], mode: "D", minutes: 15 });
-  assert.equal(iso.ok, true);
+  // Places to meet, and real journey times to them. These replaced the
+  // isochrone action, which could not answer for public transport at all.
+  const circle = { lat: 60.18, lon: 24.95, radiusKm: 10 };
+  const venues = await call("meetingVenues", { circle });
+  assert.equal(venues.ok, true);
+  assert.ok(venues.result.length > 0, "the offline stub must offer somewhere to meet");
+  venues.result.forEach((v) => {
+    assert.equal(typeof v.name, "string");
+    assert.equal(typeof v.lat, "number");
+    assert.equal(typeof v.lon, "number");
+    assert.ok(v.kind, "a venue without a kind cannot be described to the organizer");
+  });
+
+  const grid = await call("travelTimeGrid", {
+    origins: [{ id: "m1", lat: 60.18, lon: 24.95, mode: "P" }, { id: "m2", lat: 60.2, lon: 24.9, mode: "D" }],
+    points: [{ lat: 60.19, lon: 24.93 }, { lat: 60.21, lon: 24.88 }],
+  });
+  assert.equal(grid.ok, true);
+  // One row per origin, one entry per point, aligned with what was asked.
+  assert.deepEqual(Object.keys(grid.result).sort(), ["m1", "m2"]);
+  Object.values(grid.result).forEach((times) => {
+    assert.equal(times.length, 2);
+    // A number of minutes, or null for "there is no way to get there", which
+    // the scorer treats as a hard exclusion rather than a long journey.
+    times.forEach((t) => assert.ok(t === null || typeof t === "number"));
+  });
 });

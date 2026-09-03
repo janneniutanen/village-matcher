@@ -755,7 +755,17 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
     .sort((a, b) => a.worstMinutes - b.worstMinutes)
     .slice(0, MEETING_OPTIONS);
 
+  // Everyone in the pool is on this map, so the members of the group being
+  // looked at have to be picked out or the suggestion is a set of lines
+  // reaching into an anonymous crowd of dots. Rung in the group's own colour,
+  // and drawn into the overlap layer so they clear when it is toggled off.
+  markActiveMembers(members, color);
+
   if (!workable.length) {
+    // Still worth framing the group: the coordinator can at least see who is
+    // in it and how far apart they are, which is the explanation for why
+    // there is no answer.
+    frameGroup(members, []);
     // An honest empty answer. The old version always drew something, which
     // made a group nobody can gather look workable.
     const near = Reachability.nearestMiss(scored);
@@ -774,11 +784,26 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
     const primary = rank === 0;
 
     members.forEach((m) => {
-      L.polyline([m.coords, [option.lat, option.lon]], {
+      const path = [m.coords, [option.lat, option.lon]];
+      // Drawn twice: a pale casing underneath, then the coloured line on top.
+      // The group colours are dark and muted by design, which makes them
+      // nearly invisible against OpenStreetMap's own greens and greys, and
+      // simply brightening them would lose the link to the group's pins. A
+      // casing is what map renderers do to keep a route legible over any
+      // basemap, and it keeps the colour meaningful.
+      L.polyline(path, {
+        color: '#FFFFFF',
+        weight: primary ? 7 : 5,
+        opacity: primary ? 0.9 : 0.55,
+        lineCap: 'round',
+      }).addTo(overlapLayer);
+
+      L.polyline(path, {
         color,
-        weight: primary ? 2.5 : 1.5,
-        opacity: primary ? 0.75 : 0.3,
-        dashArray: primary ? null : '4,5',
+        weight: primary ? 3.5 : 2,
+        opacity: primary ? 1 : 0.65,
+        dashArray: primary ? null : '5,5',
+        lineCap: 'round',
       }).addTo(overlapLayer);
     });
 
@@ -793,11 +818,44 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
     }).addTo(overlapLayer).bindPopup(meetingPopup(option, rank));
   });
 
+  frameGroup(members, workable);
+
   const best = workable[0];
   setOverlapStatus(
     `Best of ${workable.length}: ${best.name} (${Math.round(best.worstMinutes)} min for whoever travels furthest). ` +
     `Click a marker for each member's journey.` + caveat
   );
+}
+
+// A ring around each member of the group currently being shown. Dashed, and
+// wider than the pin inside it, so it reads as a selection rather than as
+// another person, and cannot be confused with the solid highlight ring that
+// marks one individual picked from a list.
+function markActiveMembers(members, color) {
+  members.forEach((m) => {
+    L.circleMarker(m.coords, {
+      radius: 15, color, weight: 3, fill: false, dashArray: '4,3', opacity: 0.9,
+    }).addTo(overlapLayer);
+  });
+}
+
+// Zooms to the group and its suggestions. Without this the map stays wherever
+// it was framed over the whole applicant pool, which for a national dataset
+// can be hundreds of kilometres wide, and the meeting markers are a few
+// indistinguishable pixels somewhere in it.
+function frameGroup(members, options) {
+  const points = [
+    ...members.map((m) => m.coords),
+    ...options.map((o) => [o.lat, o.lon]),
+  ];
+  if (!points.length) return;
+
+  // Deliberately overrides wherever the organizer had panned to: she just
+  // asked to see this group, so moving there is the answer to the click.
+  map.fitBounds(L.latLngBounds(points), { padding: [70, 70], maxZoom: 15 });
+  // The pool-wide framing has been replaced, so a later re-render must not
+  // undo this by fitting to everyone again.
+  mapFramed = true;
 }
 
 const VENUE_ICON = {
@@ -844,6 +902,45 @@ function setOverlapStatus(text) {
 }
 
 const MODE_ICON = { W: '🚶', D: '🚙', P: '🚌', B: '🚲' };
+const MODE_LABEL = { W: 'walk', D: 'car', P: 'public transport', B: 'bicycle' };
+
+// A flag per language, for the compact summary on an applicant row. Only
+// languages with one widely-understood country association are listed. Arabic
+// and Kurdish are spoken across many countries and by people from many more,
+// so choosing a flag for them would state something false about the person;
+// those fall through to their name in text, which is the honest answer.
+const FLAG_MAP = {
+  Finnish: '\u{1F1EB}\u{1F1EE}', English: '\u{1F1EC}\u{1F1E7}', Swedish: '\u{1F1F8}\u{1F1EA}',
+  Russian: '\u{1F1F7}\u{1F1FA}', Ukrainian: '\u{1F1FA}\u{1F1E6}', Estonian: '\u{1F1EA}\u{1F1EA}',
+  Polish: '\u{1F1F5}\u{1F1F1}', Romanian: '\u{1F1F7}\u{1F1F4}', Turkish: '\u{1F1F9}\u{1F1F7}',
+  Somali: '\u{1F1F8}\u{1F1F4}', Vietnamese: '\u{1F1FB}\u{1F1F3}', Thai: '\u{1F1F9}\u{1F1ED}',
+  Chinese: '\u{1F1E8}\u{1F1F3}', Japanese: '\u{1F1EF}\u{1F1F5}', Hindi: '\u{1F1EE}\u{1F1F3}',
+  Bengali: '\u{1F1E7}\u{1F1E9}', Nepali: '\u{1F1F3}\u{1F1F5}', Tagalog: '\u{1F1F5}\u{1F1ED}',
+  Spanish: '\u{1F1EA}\u{1F1F8}', Portuguese: '\u{1F1F5}\u{1F1F9}', French: '\u{1F1EB}\u{1F1F7}',
+  Italian: '\u{1F1EE}\u{1F1F9}', German: '\u{1F1E9}\u{1F1EA}', Farsi: '\u{1F1EE}\u{1F1F7}',
+  Persian: '\u{1F1EE}\u{1F1F7}',
+};
+
+// The compact line that used to sit on every applicant row and disappeared
+// with the village rewrite: which languages she speaks, how she travels, and
+// how far she will go. Emoji alone are ambiguous and say nothing to a screen
+// reader, so the cluster carries the same information as text in its title.
+function applicantTags(a) {
+  const flags = a.language.map((l) => FLAG_MAP[l] || `<span class="tag-word">${escHtml(l)}</span>`).join('');
+  const modes = a.transport.map((m) => MODE_ICON[m] || escHtml(m)).join('');
+  const travel = a.maxTravel || a.maxTravel === 0 ? `${escHtml(a.maxTravel)} min` : '';
+  const title = [
+    a.language.length ? `Speaks ${a.language.join(', ')}` : '',
+    a.transport.length ? `Travels by ${a.transport.map((m) => MODE_LABEL[m] || m).join(', ')}` : '',
+    travel ? `up to ${a.maxTravel} min` : '',
+  ].filter(Boolean).join(' \u00B7 ');
+
+  if (!flags && !modes && !travel) return '';
+  return `<span class="applicant-tags" title="${escHtml(title)}">${flags}` +
+    `${modes ? `<span class="tag-modes">${modes}</span>` : ''}` +
+    `${travel ? `<span class="tag-travel">${travel}</span>` : ''}</span>`;
+}
+
 
 const SCORE_LABELS = {
   travel:   'Travel',
@@ -994,14 +1091,18 @@ function applicantCard(a, mapColor) {
     ? `<button class="locate-btn" type="button" data-locate="${escHtml(a.id)}" title="Show on map">📍</button>`
     : '';
 
+  // The name, not the identity number. An organizer thinks in names, and the
+  // number told her nothing usable while scanning a list. It is still in the
+  // details, and still on the row as a data attribute for the map.
   return `
     <div class="mini-card unmatched-card applicant-card${locatable ? ' locatable' : ''}" data-applicant-id="${escHtml(a.id)}">
       <div class="unmatched-summary">
-        <span class="participant-id-wrap">${mapDot}<button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.id)}</button></span>
-        <span>${escHtml(a.name)}${expectingBadge} · ${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span>
+        <span class="participant-id-wrap">${mapDot}<button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.name || a.id)}</button>${expectingBadge}</span>
+        <span class="applicant-summary-line">${applicantTags(a)}<span class="applicant-address">${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span></span>
         <span class="applicant-locate">${a.geocodedReal && a.coords ? escHtml(a.coords) : '<em>no location</em>'}${locateBtn}</span>
       </div>
       <div class="applicant-details" hidden>
+        ${detailRow('Identity number', a.id)}
         ${detailRow('Name', a.name)}
         ${phoneRow()}
         ${detailRow(a.expecting ? 'Due' : 'Baby DOB', MatchingEngine.formatMonthYear(a.dob))}
