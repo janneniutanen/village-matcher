@@ -8,17 +8,16 @@
 // designed around a Lambda invocation limit.
 //
 // Handles all backend actions: Google Sheets read/write (via service account),
-// geocoding (Digitransit), travel time (OSRM + Digitransit routing), and
-// isochrones (OpenRouteService). All credentials come from Netlify environment
-// variables — never from the browser.
+// geocoding and travel times (Digitransit), and meeting-place lookup
+// (OpenStreetMap via Overpass). All credentials come from environment
+// variables, never from the browser.
 //
 // Environment variables required:
 //   MATCHER_PASSWORD           — password the organizer enters in the UI
 //   GOOGLE_SERVICE_ACCOUNT_JSON — full contents of the service account JSON key file
 //   SPREADSHEET_ID             — Google Sheet ID (the long string in the sheet URL)
 //   SOURCE_TAB                 — sheet tab name containing applicant data
-//   DIGITRANSIT_API_KEY        — from portal.digitransit.fi
-//   ORS_API_KEY                — from openrouteservice.org
+//   DIGITRANSIT_API_KEY        - from portal.digitransit.fi
 
 const { google } = require('googleapis');
 const fs         = require('fs');
@@ -864,28 +863,220 @@ async function transitMinutes(from, to, departure = representativeDeparture()) {
 }
 
 // ---------------------------------------------------------------------------
-// Isochrones — OpenRouteService v2
+// Meeting venues, from OpenStreetMap
 // ---------------------------------------------------------------------------
-const ORS_PROFILE = { W: 'foot-walking', B: 'cycling-regular', D: 'driving-car' };
+// Somewhere a group of mothers with a baby can actually meet. Digitransit's
+// geocoder does have a `venue` layer, but it returns no category at all, so a
+// search around Tampere centre comes back with a mix of hairdressers, kebab
+// shops and a theatre with nothing to tell them apart. Useless for picking a
+// place to take a pram.
+//
+// OpenStreetMap has the tags for exactly this, and Overpass will answer a
+// bounding-box query for them: around Tampere it finds 872 playgrounds, 681
+// parks, 53 community centres and 14 shopping malls, named.
+const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+const OVERPASS_USER_AGENT = 'village-matcher (janne.niutanen@cgi.com)';
 
-async function isochroneReq(locations, mode, minutes) {
-  const key     = process.env.ORS_API_KEY;
-  if (!key) throw new Error('ORS_API_KEY environment variable is not set');
-  const profile = ORS_PROFILE[mode] || 'driving-car';
+// Malls are here because of the winter. An outdoor meeting is not an option
+// for a good few months of a Finnish year, and a mall is warm, free, has a
+// lift and somewhere to feed a baby.
+const OVERPASS_TAGS = [
+  ['leisure', 'playground'],
+  ['leisure', 'park'],
+  ['amenity', 'community_centre'],
+  ['shop', 'mall'],
+];
 
-  const resp = await fetch(`https://api.openrouteservice.org/v2/isochrones/${profile}`, {
+// Overpass is a free, shared, community-run service, so results are cached for
+// the life of the process and the box is rounded to keep near-identical groups
+// on the same cache entry.
+const _venueCache = new Map();
+
+// Rounded, so two groups centred a few hundred metres apart share one entry
+// rather than each paying for its own Overpass query.
+function venueCacheKey(circle) {
+  return `${circle.lat.toFixed(2)},${circle.lon.toFixed(2)},${circle.radiusKm}`;
+}
+
+// Overpass is free and community-run, and it sheds load when busy: the same
+// query that answers in 2s with 1688 elements returns 504 minutes later. That
+// is normal operation for it, not a bug to be surprised by, so retry a couple
+// of times and let the caller carry on without venues if it stays down.
+async function overpassFetch(query, attempt = 0) {
+  const resp = await fetch(OVERPASS_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': key },
-    body: JSON.stringify({
-      locations:     locations.map(l => [l.lon, l.lat]),
-      range:         [minutes * 60],
-      intersections: true,
-    }),
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      // Overpass answers 406 Not Acceptable without one. It is also their
+      // etiquette policy: a shared service is entitled to know who is calling
+      // it and how to reach them.
+      'User-Agent': OVERPASS_USER_AGENT,
+    },
+    body: new URLSearchParams({ data: query }),
   });
-  if (!resp.ok) {
-    throw new Error(`ORS returned HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+
+  if ((resp.status === 429 || resp.status >= 500) && attempt < 2) {
+    await sleep(1500 * (attempt + 1));
+    return overpassFetch(query, attempt + 1);
   }
-  return resp.json();
+  if (!resp.ok) throw new Error(`Overpass returned HTTP ${resp.status}`);
+
+  const data = await resp.json();
+  // Overpass reports its own timeouts and capacity limits in `remark`, with
+  // HTTP 200 and an empty element list. Unchecked, that is indistinguishable
+  // from "there are no playgrounds near this group", which would quietly
+  // reduce every suggestion to the members' own homes.
+  if (data.remark) throw new Error(`Overpass: ${String(data.remark).slice(0, 160)}`);
+  return data;
+}
+
+async function meetingVenues(circle) {
+  if (!circle || typeof circle.lat !== 'number' || typeof circle.lon !== 'number') return [];
+  const radiusKm = Math.min(Math.max(circle.radiusKm || 10, 1), 25);
+  const key = venueCacheKey({ ...circle, radiusKm });
+  if (_venueCache.has(key)) return _venueCache.get(key);
+
+  // A box, not Overpass's own `around:` circle. `around:` is the natural way to
+  // say this and it works for nodes, but combined with `way` elements it goes
+  // from answering in 2 seconds to timing out at 40 and returning nothing at
+  // all, because it has to test every way's geometry against the circle.
+  // Playgrounds and parks are mapped as areas, so that is most of the data.
+  //
+  // The box is a little generous at the corners; the caller trims to the true
+  // radius, which is exact and free.
+  const dLat = radiusKm / 111.32;
+  const dLon = radiusKm / (111.32 * Math.cos((circle.lat * Math.PI) / 180));
+  const bbox = [
+    circle.lat - dLat, circle.lon - dLon,
+    circle.lat + dLat, circle.lon + dLon,
+  ].map((n) => n.toFixed(5)).join(',');
+
+  // Both nodes and ways, because a playground is usually mapped as an area,
+  // and `out center` reduces each to a single point so the caller does not
+  // have to handle polygons.
+  //
+  // Named places only. Two thirds of OSM playgrounds have no name and are no
+  // use here, since a mother cannot be told to meet at an unnamed polygon.
+  // Filtering server-side cut the reply from 1688 elements to 644 rather than
+  // downloading the difference in order to discard it.
+  const clauses = OVERPASS_TAGS
+    .flatMap(([k, v]) => [`node["${k}"="${v}"]["name"](${bbox});`, `way["${k}"="${v}"]["name"](${bbox});`])
+    .join('\n  ');
+  const query = `[out:json][timeout:25];\n(\n  ${clauses}\n);\nout center tags;`;
+
+  const data = await overpassFetch(query);
+  const venues = (data.elements || []).map((el) => {
+    const tags = el.tags || {};
+    const centre = el.center || { lat: el.lat, lon: el.lon };
+    return {
+      id: `${el.type}/${el.id}`,
+      name: tags.name || tags['name:fi'] || null,
+      kind: tags.leisure || tags.amenity || tags.shop || null,
+      lat: centre?.lat,
+      lon: centre?.lon,
+    };
+  }).filter((v) => typeof v.lat === 'number' && typeof v.lon === 'number');
+
+  _venueCache.set(key, venues);
+  return venues;
+}
+
+// ---------------------------------------------------------------------------
+// Travel-time grid: many origins to many candidate points, in bulk
+// ---------------------------------------------------------------------------
+// This is what makes an accurate group overlap affordable. Asking the router
+// one journey per HTTP request, as travelTimeBatch does, costs a request per
+// member per candidate point: a 3x3 grid for four members is 36 round trips.
+// GraphQL will answer many aliased queries in a single request, so the same 36
+// journeys become 4 requests, one per member. Measured against the live
+// router: 8 real transit journeys in one request in 1.7s, 25 in 5.7s.
+//
+// Every journey is a real itinerary from the same router Reittiopas uses, with
+// real timetables, real walking legs to the stop and real waiting time. None
+// of it is modelled or interpolated.
+const GRID_MAX_POINTS_PER_REQUEST = 12;
+
+// One aliased planConnection per candidate point. Transit needs the scheduled
+// query; walking, cycling and driving are direct and leave immediately.
+function gridQuery(origin, points, departure) {
+  const mode = DIRECT_MODE[origin.mode];
+  const fields = origin.mode === 'P' ? 'duration start' : 'duration';
+  const modeArg = origin.mode === 'P' ? '' : `modes: { directOnly: true, direct: [${mode}] },`;
+
+  const aliases = points.map((point, i) => `p${i}: planConnection(
+    origin:      { location: { coordinate: { latitude: ${origin.lat}, longitude: ${origin.lon} } } },
+    destination: { location: { coordinate: { latitude: ${point.lat}, longitude: ${point.lon} } } },
+    dateTime:    { earliestDeparture: "${departure}" },
+    ${modeArg}
+    first: 1
+  ) { edges { node { ${fields} } } }`).join('\n');
+
+  return `{ ${aliases} }`;
+}
+
+async function gridChunk(origin, points, departure) {
+  const key = process.env.DIGITRANSIT_API_KEY;
+  if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
+  if (origin.mode !== 'P' && !DIRECT_MODE[origin.mode]) {
+    throw new Error(`Unknown transport mode '${origin.mode}'`);
+  }
+
+  const resp = await fetch('https://api.digitransit.fi/routing/v2/finland/gtfs/v1', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'digitransit-subscription-key': key },
+    body: JSON.stringify({ query: gridQuery(origin, points, departure) }),
+  });
+  if (!resp.ok) throw new Error(`Digitransit routing returned HTTP ${resp.status}`);
+
+  const data = await resp.json();
+  // GraphQL reports schema problems in `errors` with HTTP 200, and a whole
+  // aliased batch fails together, so this must be checked before reading.
+  if (data.errors?.length) throw new Error(`Digitransit routing: ${data.errors[0].message}`);
+
+  return points.map((_, i) => {
+    const node = data.data?.[`p${i}`]?.edges?.[0]?.node;
+    // null, not a large number: "no way to get there" is different in kind
+    // from "a long way", and the caller treats it as a hard exclusion.
+    if (!node) return null;
+    if (origin.mode !== 'P') return node.duration / 60;
+    // Waiting for the first departure is part of the journey as far as the
+    // traveller is concerned, exactly as in transitMinutes.
+    const waitMs = Math.max(0, new Date(node.start).getTime() - new Date(departure).getTime());
+    return node.duration / 60 + waitMs / 60000;
+  });
+}
+
+// origins: [{ id, lat, lon, mode }], points: [{ lat, lon }]
+// Returns { [originId]: [minutes | null, ...] } aligned with `points`.
+// Enough for a shortlist of venues plus every member's home, and a ceiling so
+// a mistake upstream cannot turn one click into hundreds of routing queries.
+const GRID_MAX_POINTS = 24;
+
+async function travelTimeGrid(origins, points) {
+  const departure = representativeDeparture();
+  const list = (points || []).slice(0, GRID_MAX_POINTS);
+  const out = {};
+
+  // Origins run in parallel, their own chunks in sequence. The router
+  // serializes work per key, so firing every chunk at once buys nothing and
+  // risks the documented 10 requests/second guidance.
+  await Promise.all((origins || []).map(async (origin) => {
+    const times = [];
+    for (let i = 0; i < list.length; i += GRID_MAX_POINTS_PER_REQUEST) {
+      const chunk = list.slice(i, i + GRID_MAX_POINTS_PER_REQUEST);
+      try {
+        times.push(...await gridChunk(origin, chunk, departure));
+      } catch (err) {
+        // One member's failure must not sink the whole grid; their points read
+        // as unreachable, which the scorer already handles.
+        console.warn(`[api] grid chunk failed for ${origin.id}: ${err.message}`);
+        times.push(...chunk.map(() => null));
+      }
+    }
+    out[origin.id] = times;
+  }));
+
+  return out;
 }
 
 // ---------------------------------------------------------------------------
@@ -908,7 +1099,8 @@ async function dispatch(body) {
 
     case 'geocode':    return geocodeBatch(body.addresses);
     case 'travelTime': return travelTimeBatch(body.pairs);
-    case 'isochrone':  return isochroneReq(body.locations, body.mode, body.minutes);
+    case 'travelTimeGrid': return travelTimeGrid(body.origins, body.points);
+    case 'meetingVenues':  return meetingVenues(body.circle);
 
     case 'getApplicants':   return sheetGetApplicants();
     case 'updateApplicant': return sheetUpdateApplicant(body.id, body.fields);

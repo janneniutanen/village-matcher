@@ -589,3 +589,37 @@ test("UI smoke: expecting mothers are matched and marked as expecting", async ()
     }
   }
 });
+
+test("UI smoke: the browser scripts declare no colliding globals", () => {
+  // index.html loads these as classic script tags, which share one global
+  // lexical scope. A duplicate top-level name is a SyntaxError that stops the
+  // whole file executing, and the symptom appears somewhere else entirely:
+  // reachability.js destructuring `haversineKm` collided with the function of
+  // that name in matching-engine.js, and the app reported it as
+  // "Reachability is not defined".
+  const declarations = (file) => {
+    const names = new Set();
+    fs.readFileSync(path.join(__dirname, "..", file), "utf8").split("\n").forEach((line) => {
+      let m = line.match(/^(?:const|let|var)\s+([A-Za-z_$][\w$]*)/);
+      if (m) names.add(m[1]);
+      m = line.match(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/);
+      if (m) names.add(m[1]);
+      // Destructuring at column 0, which is how the collision arrived.
+      m = line.match(/^const\s*\{\s*([^}]+)\}/);
+      if (m) m[1].split(",").forEach((n) => names.add(n.trim().split(":")[0]));
+    });
+    return names;
+  };
+
+  // The same files, in the same order, that index.html pulls in.
+  const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
+  const files = [...html.matchAll(/<script src="(src\/[^"]+)"><\/script>/g)].map((m) => m[1]);
+  assert.ok(files.length >= 3, `expected the app's own scripts, found ${files.join(", ")}`);
+
+  const sets = files.map((f) => [f, declarations(f)]);
+  const collisions = [];
+  sets.forEach(([fileA, a], i) => sets.slice(i + 1).forEach(([fileB, b]) => {
+    [...a].filter((n) => b.has(n)).forEach((n) => collisions.push(`${n} in both ${fileA} and ${fileB}`));
+  }));
+  assert.deepEqual(collisions, []);
+});

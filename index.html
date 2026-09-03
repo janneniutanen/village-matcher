@@ -63,7 +63,9 @@
       <span><i class="legend-dot legend-dot-dashed"></i>unmatched</span>
       <span><i class="legend-dot legend-dot-faint"></i>approximate location</span>
       <span><i class="legend-dot legend-dot-count">2</i>more than one person here</span>
+      <span><i class="legend-dot legend-dot-meeting"></i>suggested meeting place</span>
     </div>
+    <p id="overlapStatus" class="overlap-status" hidden></p>
 
     <h2 class="section-title">Candidate groups</h2>
     <div id="candidateCards" class="card-list"></div>
@@ -121,6 +123,7 @@
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="src/matching-engine.js"></script>
+<script src="src/reachability.js"></script>
 <script src="src/validation.js"></script>
 <script src="src/app.js"></script>
 </body>

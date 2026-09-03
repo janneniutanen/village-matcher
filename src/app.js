@@ -2,7 +2,7 @@
 //
 // Talks to the Netlify Function at /.netlify/functions/api for all
 // backend operations (Google Sheets read/write, geocoding, travel time,
-// isochrones). A password stored in localStorage is sent as
+// meeting-place suggestions). A password stored in localStorage is sent as
 // X-Matcher-Password on every request.
 //
 // For local development against local-test-server.js, append
@@ -647,36 +647,200 @@ function focusApplicantOnMap(applicantId) {
   return true;
 }
 
+// How many venues to measure. Each one costs a real routing query per member,
+// so this is the budget: a dozen options plus the members' own homes is enough
+// to find a good answer without turning one click into a minute of waiting.
+const MEETING_SHORTLIST = 9;
+// How many to actually offer. More than a handful is not a choice, it is a
+// list, and the coordinator has to put one of these in a message.
+const MEETING_OPTIONS = 3;
+
+// Real travel times are slow enough that clicking the same group twice should
+// not pay for them again. Keyed by the members, so editing a group discards it.
+const meetingCache = new Map();
+
+function meetingCacheKey(members) {
+  return members.map((m) => `${m.id}:${m.coords}:${m.maxTravel}`).sort().join('|');
+}
+
+// The mode a member would actually use to get somewhere: the fastest she has.
+// Unlike the old overlap this does not need the group to share a mode, which
+// is what made that version useless on real data. Three of four real groups
+// had exactly one transit-only member, and that one member stopped the whole
+// group from being measured at all.
+function travelMode(applicant) {
+  return [...applicant.transport]
+    .sort((a, b) => MatchingEngine.MODE_MODEL[b].speedKmh - MatchingEngine.MODE_MODEL[a].speedKmh)[0];
+}
+
+// Somewhere the group could actually meet, ranked by the worst journey any
+// member would make. Matching has already put these members near each other,
+// so the search is a fixed radius around their combined centre.
+async function findMeetingPoints(members) {
+  const circle = Reachability.venueSearchCircle(members);
+  const centre = [circle.lat, circle.lon];
+
+  // Their own homes are always candidates and cost nothing to offer. For a
+  // mother with a small baby someone's living room often beats a park.
+  let candidates = Reachability.homesAsVenues(members);
+
+  try {
+    const venues = await callBackend('meetingVenues', { circle });
+    candidates = candidates.concat(
+      Reachability.shortlistVenues(venues, centre, {
+        limit: MEETING_SHORTLIST, maxDistanceKm: circle.radiusKm,
+      })
+    );
+  } catch (err) {
+    // OpenStreetMap's Overpass is a free shared service and sheds load when
+    // busy. Losing it means fewer options, not no answer, so carry on with
+    // the homes rather than failing the whole click.
+    console.warn('Venue lookup failed, offering homes only:', err.message);
+  }
+
+  const times = await callBackend('travelTimeGrid', {
+    origins: members.map((m) => ({ id: m.id, lat: m.coords[0], lon: m.coords[1], mode: travelMode(m) })),
+    points:  candidates.map((v) => ({ lat: v.lat, lon: v.lon })),
+  });
+
+  return Reachability.scorePoints(candidates, times, members);
+}
+
 async function drawOverlap(candidateId) {
   overlapLayer.clearLayers();
+  // Toggling the suggestions off has to take the status line with it, or the
+  // last result sits there describing markers that are no longer on the map.
+  setOverlapStatus(null);
   if (!candidateId) return;
   const cand = state.candidateGroups.find((c) => c.candidateId === candidateId);
   if (!cand) return;
-  const members = cand.memberIds.map(getApplicant);
-  const color   = candidateColor(candidateId);
 
-  // Isochrones need a mode every member shares. Prefer driving over walking
-  // because it yields the larger, more useful overlap area.
-  const commonModes = members.reduce((acc, m) => acc.filter((mode) => m.transport.includes(mode)), ['D', 'W']);
-  const mode        = commonModes.includes('D') ? 'D' : commonModes.includes('W') ? 'W' : null;
+  const all      = cand.memberIds.map(getApplicant);
+  const members  = all.filter((m) => m.coords && m.transport.length);
+  const excluded = all.filter((m) => !m.coords || !m.transport.length);
 
-  if (mode && members.length <= 5) {
+  if (members.length < 2) {
+    setOverlapStatus('Not enough of this group has a location and a way of travelling to work out where to meet.');
+    return;
+  }
+  // Silently leaving someone out would produce a meeting place that does not
+  // actually work for the whole group, which is worse than saying so.
+  const caveat = excluded.length
+    ? ` Not counting ${excluded.map((m) => m.name).join(', ')}, who ${excluded.length === 1 ? 'has' : 'have'} no usable location or transport.`
+    : '';
+  const color = candidateColor(candidateId);
+
+  const key = meetingCacheKey(members);
+  let scored = meetingCache.get(key);
+
+  if (!scored) {
+    // Real itineraries from the router Reittiopas runs on, so this takes a few
+    // seconds. Say so, rather than appearing to have ignored the click.
+    setOverlapStatus('Finding places to meet and checking real travel times\u2026');
     try {
-      const minutes   = Math.min(...members.map((m) => m.maxTravel));
-      const locations = members.map((m) => ({ lat: m.coords[0], lon: m.coords[1] }));
-      const geojson   = await callBackend('isochrone', { locations, mode, minutes });
-      L.geoJSON(geojson, { style: { color, weight: 1, fillColor: color, fillOpacity: 0.15 } }).addTo(overlapLayer);
-      return;
+      scored = await findMeetingPoints(members);
+      meetingCache.set(key, scored);
     } catch (err) {
-      console.warn('Isochrone call failed, falling back to radius circles:', err.message);
+      console.warn('Meeting point search failed:', err.message);
+      setOverlapStatus(`Could not work out where to meet: ${err.message}`);
+      return;
     }
   }
+  renderMeetingPoints(scored, members, color, caveat);
+}
 
-  members.forEach((a) => {
-    const bestSpeed = Math.max(...a.transport.map((m) => MatchingEngine.MODE_MODEL[m].speedKmh));
-    const radiusKm  = (a.maxTravel / 60) * bestSpeed;
-    L.circle(a.coords, { radius: radiusKm * 1000, color, weight: 1, fillColor: color, fillOpacity: 0.12 }).addTo(overlapLayer);
+function renderMeetingPoints(scored, members, color, caveat = '') {
+  const workable = scored
+    .filter((s) => s.reachable)
+    .sort((a, b) => a.worstMinutes - b.worstMinutes)
+    .slice(0, MEETING_OPTIONS);
+
+  if (!workable.length) {
+    // An honest empty answer. The old version always drew something, which
+    // made a group nobody can gather look workable.
+    const near = Reachability.nearestMiss(scored);
+    const spread = Reachability.groupSpreadKm(members);
+    setOverlapStatus(
+      'No shared meeting place works for everyone within their stated travel limits. ' +
+      (near ? `The closest was ${near.name}, ${Math.round(Math.max(...near.perMember.map((r) => r.minutes)))} min for the furthest member. ` : '') +
+      `These members live ${spread.toFixed(1)}km apart.` + caveat
+    );
+    return;
+  }
+
+  // Lines from each member to each option, so it is visible at a glance who
+  // is being asked to travel furthest.
+  workable.forEach((option, rank) => {
+    const primary = rank === 0;
+
+    members.forEach((m) => {
+      L.polyline([m.coords, [option.lat, option.lon]], {
+        color,
+        weight: primary ? 2.5 : 1.5,
+        opacity: primary ? 0.75 : 0.3,
+        dashArray: primary ? null : '4,5',
+      }).addTo(overlapLayer);
+    });
+
+    // A square marker, deliberately unlike the round pins that mean people.
+    L.marker([option.lat, option.lon], {
+      icon: L.divIcon({
+        className: 'meeting-marker' + (primary ? ' meeting-marker-best' : ''),
+        html: `<span style="border-color:${escHtml(color)}">${VENUE_ICON[option.kind] || '\u{1F4CD}'}</span>`,
+        iconSize: [26, 26],
+        iconAnchor: [13, 13],
+      }),
+    }).addTo(overlapLayer).bindPopup(meetingPopup(option, rank));
   });
+
+  const best = workable[0];
+  setOverlapStatus(
+    `Best of ${workable.length}: ${best.name} (${Math.round(best.worstMinutes)} min for whoever travels furthest). ` +
+    `Click a marker for each member's journey.` + caveat
+  );
+}
+
+const VENUE_ICON = {
+  playground:       '\u{1F6DD}',
+  park:             '\u{1F333}',
+  community_centre: '\u{1F3E4}',
+  mall:             '\u{1F6CD}',
+  home:             '\u{1F3E1}',
+};
+
+const VENUE_LABEL = {
+  playground:       'playground',
+  park:             'park',
+  community_centre: 'community centre',
+  mall:             'shopping centre',
+  home:             'a member\u2019s home',
+};
+
+function meetingPopup(option, rank) {
+  const rows = option.perMember.map((r) => {
+    const who  = getApplicant(r.id);
+    const mode = who ? MODE_ICON[travelMode(who)] || '' : '';
+    const time = r.minutes === null ? 'no route' : `${Math.round(r.minutes)} min`;
+    const over = r.minutes !== null && r.minutes > r.limit;
+    return `<div>${mode} ${escHtml(who ? who.name : r.id)} ` +
+      `<strong${over ? ' style="color:#B3261E"' : ''}>${time}</strong>` +
+      `<span style="opacity:.6"> of ${escHtml(r.limit)} min</span></div>`;
+  }).join('');
+
+  return `<strong>${escHtml(option.name)}</strong><br>` +
+    `<span style="opacity:.7">${escHtml(VENUE_LABEL[option.kind] || option.kind || 'place')}` +
+    `${rank === 0 ? ' \u00B7 best option' : ''}</span><br>` +
+    `Longest journey ${Math.round(option.worstMinutes)} min` +
+    `<div style="margin-top:5px">${rows}</div>`;
+}
+
+// Written next to the map legend, because this takes a few seconds and can
+// legitimately come back empty. Both need saying somewhere visible.
+function setOverlapStatus(text) {
+  const el = document.getElementById('overlapStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.hidden = !text;
 }
 
 const MODE_ICON = { W: '🚶', D: '🚙', P: '🚌', B: '🚲' };
@@ -763,7 +927,7 @@ function renderCandidateCards() {
       <div class="card-actions">
         <button data-action="approve" data-id="${escHtml(candidateGroup.candidateId)}">Approve</button>
         <button data-action="reject"  data-id="${escHtml(candidateGroup.candidateId)}">Reject</button>
-        <button data-action="overlap" data-id="${escHtml(candidateGroup.candidateId)}">View overlap on map</button>
+        <button data-action="overlap" data-id="${escHtml(candidateGroup.candidateId)}">Suggest where to meet</button>
       </div>`;
     container.appendChild(card);
   });

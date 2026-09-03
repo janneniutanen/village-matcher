@@ -13,9 +13,9 @@ by the `Village` column the coordinator maintains there.
 Browser (Netlify static)
   ↓  POST /.netlify/functions/api  +  X-Matcher-Password header
 Netlify Function
-  ├── Google Sheets API  (service account — GOOGLE_SERVICE_ACCOUNT_JSON env var)
-  ├── Digitransit API    (geocoding + transit routing — DIGITRANSIT_API_KEY)
-  └── OpenRouteService   (isochrones — ORS_API_KEY)
+  ├── Google Sheets API  (service account, GOOGLE_SERVICE_ACCOUNT_JSON env var)
+  ├── Digitransit API    (geocoding + routing, DIGITRANSIT_API_KEY)
+  └── Overpass API       (OpenStreetMap places to meet, no key needed)
 ```
 
 The organizer runs this locally with `node server.js` and opens
@@ -39,7 +39,6 @@ MATCHER_PASSWORD=...
 SPREADSHEET_ID=...
 SOURCE_TAB=Form Responses 1
 DIGITRANSIT_API_KEY=...
-ORS_API_KEY=...
 GOOGLE_SERVICE_ACCOUNT_KEY_FILE=village-matcher-key.json   # path to key file
 ```
 
@@ -60,7 +59,6 @@ All credentials are set as environment variables in the Netlify dashboard
 | `SPREADSHEET_ID` | Google Sheet ID (the long string in the sheet URL) |
 | `SOURCE_TAB` | Sheet tab name containing applicant data |
 | `DIGITRANSIT_API_KEY` | From portal.digitransit.fi |
-| `ORS_API_KEY` | From openrouteservice.org |
 
 See `docs/ORGANIZER-SETUP.md` for step-by-step Netlify deployment instructions.
 
@@ -72,14 +70,16 @@ styles.css
 src/
   app.js                     all UI logic and backend calls
   matching-engine.js         grouping algorithm
+  reachability.js            picking where a group should meet (browser + backend)
+  regions.js                 Finnish place reference and geocode verification (Node only)
   validation.js              row validation (browser + function share same file)
 netlify/
   functions/
-    api.js                   Netlify Function — all backend logic
-netlify.toml                 Netlify build config
-server.js                    local production server (serves frontend + API)
+    api.js                   all backend logic (imported by server.js too)
+netlify.toml                 Netlify build config (optional hosted path)
+server.js                    local server the organizer actually runs
 local-test-server.js         local dev server (CSV mock data only)
-mock-applicants.csv          150 sample rows for offline testing
+mock-applicants.csv          300 sample rows for offline testing
 package.json
 tests/
 docs/
@@ -107,7 +107,6 @@ GOOGLE_SERVICE_ACCOUNT_JSON=<paste JSON here>
 SPREADSHEET_ID=<your sheet id>
 SOURCE_TAB=mock-applicants
 DIGITRANSIT_API_KEY=<key>
-ORS_API_KEY=<key>
 ```
 ```
 netlify dev
@@ -296,6 +295,65 @@ zooms in far enough that neighbouring buildings separate, and opens their
 popup. The row itself is marked so it is clear which dot belongs to which name.
 Rows that could not be placed have no such control, so clicking them is inert
 rather than a dead end.
+
+## Where should a group meet?
+
+The coordinator's real question about a candidate group is not what shape its
+travel overlap is; it is where to tell four mothers to meet. So the tool
+answers that directly.
+
+**There is no accurate isochrone available.** OpenRouteService has profiles for
+car, foot and bicycle but none for public transport, and public transport is
+how most applicants travel: 13 of the 17 people in the first real dataset.
+Digitransit has no isochrone endpoint either. Its published API list has seven
+APIs and none of them return reachable areas, and the OpenTripPlanner isochrone
+resource that older versions exposed is gone from the v2 routers.
+
+What Digitransit does have is the itinerary planner that HSL's own Reittiopas
+runs on, and a GraphQL endpoint that answers many aliased queries in one
+request. Measured: 8 real transit journeys in one request in 1.7s. So rather
+than approximate a reachable area, the tool measures real journeys to real
+places:
+
+1. **Match first.** A candidate group is already built from members who are
+   close in travel time, which is what makes a fixed search radius reasonable.
+2. **Find real places** within 10km of the group's combined centre, from
+   OpenStreetMap via Overpass: playgrounds, parks, community centres and
+   shopping malls. Malls are in that list because of the winter, when an
+   outdoor meeting is not an option for months. Every member's own home is a
+   candidate too, since for a mother with a small baby someone's living room
+   often beats a park.
+3. **Shortlist about nine**, spread out and mixed across those kinds. Around
+   Tampere, Overpass returns 872 playgrounds and 681 parks, so a pure distance
+   sort offered ten playgrounds in one neighbourhood and nothing else.
+4. **Measure real journeys** from every member to every shortlisted place,
+   each using her own fastest mode, with real timetables and real waiting time.
+5. **Offer the best three**, ranked by the longest journey anyone would make,
+   because a group is only as reachable as its most burdened member.
+
+On the map each suggestion is a square marker, deliberately unlike the round
+pins that mean people, with lines drawn to it from every member's home so it is
+obvious at a glance who is being asked to travel furthest. The popup lists each
+member's real journey against her own stated limit. A whole click takes about
+seven seconds and is cached per group.
+
+If nothing works for everyone, it says so and reports how far apart the members
+live, rather than drawing something anyway.
+
+### What this replaced
+
+The previous version drew a circle per member, radius = fastest speed x stated
+travel limit. It was wrong three ways at once: it used each member's fastest
+mode rather than one they shared, it measured straight lines across a city
+built between two large lakes, and it used the full travel limit while the
+matching engine halves journeys on the assumption a group meets in the middle.
+It looked like an isochrone and was not one.
+
+It also had a real isochrone path, for groups where every member shared driving
+or walking, and that path never ran on real data: three of four real candidate
+groups contained exactly one transit-only member, and one such member disabled
+the whole group. Measuring each member with her own mode removes that problem
+entirely.
 
 ## Sheet columns
 

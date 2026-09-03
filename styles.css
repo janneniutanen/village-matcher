@@ -179,6 +179,13 @@ button:hover { background: var(--surface-muted); }
    than an address. Matches the hollow, finely-dashed pin on the map. */
 .legend-dot-faint { border: 2px dashed var(--text-muted); opacity: 0.45; }
 /* A pin holding several people, which carries its count. */
+/* A suggested meeting place. Square, so it never reads as one of the round
+   pins that mean a person. */
+.legend-dot-meeting {
+  border: 2px solid var(--accent);
+  border-radius: 3px;
+  background: #fff;
+}
 .legend-dot-count {
   background: var(--accent);
   color: #fff;
@@ -399,6 +406,40 @@ button:hover { background: var(--surface-muted); }
   text-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
 }
 .pin-count::before { display: none; }
+/* The overlap takes a few seconds and can legitimately come back empty, so it
+   reports what happened instead of leaving the map unchanged. */
+.overlap-status {
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0 0;
+}
+.overlap-status[hidden] { display: none; }
+
+/* Suggested meeting places. Square and captioned with what kind of place it
+   is, so a suggestion is never mistaken for somebody's home. */
+.meeting-marker span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  font-size: 14px;
+  background: #fff;
+  border: 2px solid var(--accent);
+  border-radius: 4px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.meeting-marker-best span {
+  width: 32px;
+  height: 32px;
+  margin: -3px;
+  font-size: 17px;
+  border-width: 3px;
+}
+
 .pin-popup-list { max-height: 200px; overflow-y: auto; }
 .pin-popup-list hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
 
