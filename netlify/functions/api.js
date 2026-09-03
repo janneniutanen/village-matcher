@@ -1,6 +1,11 @@
 'use strict';
 
-// Netlify Function — Village Matcher backend
+// Village Matcher backend.
+//
+// The organizer runs the tool locally with `node server.js`, which imports
+// this handler directly. The Netlify Function wrapper is kept for the hosted
+// path, but the local server is what is actually used, so nothing here is
+// designed around a Lambda invocation limit.
 //
 // Handles all backend actions: Google Sheets read/write (via service account),
 // geocoding (Digitransit), travel time (OSRM + Digitransit routing), and
@@ -410,14 +415,6 @@ const GEOCODE_CONCURRENCY = 6;
 // holds however many workers are running.
 const MIN_REQUEST_SPACING_MS = 110;
 
-// A Netlify function gets about 10 seconds per synchronous invocation, and
-// being killed at the limit returns nothing at all: the whole chunk fails with
-// an opaque gateway error and the organizer sees people vanish from the map
-// with no reason given. So the batch stops starting new addresses shortly
-// before that, and reports the ones it did not reach as retryable. The
-// frontend already keeps batches small (GEOCODE_CHUNK_SIZE); this is the
-// backstop for a chunk that turns out slower than expected.
-const GEOCODE_TIME_BUDGET_MS = 8000;
 let _nextRequestSlot = 0;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -711,22 +708,9 @@ async function geocodeBatch(entries) {
     ? entry
     : `${entry?.street || ''}|${entry?.neighborhood || ''}`;
 
-  const deadline = Date.now() + GEOCODE_TIME_BUDGET_MS;
-
   return mapWithConcurrency(list, GEOCODE_CONCURRENCY, async (entry) => {
     const rawStreet    = typeof entry === 'string' ? entry : (entry?.street || '');
     const neighborhood = typeof entry === 'string' ? ''    : (entry?.neighborhood || '');
-
-    // Out of time. Reported as retryable rather than "not found", because the
-    // address is probably fine and saying otherwise would send the organizer
-    // hunting for a typo that isn't there.
-    if (Date.now() >= deadline) {
-      return {
-        street: rawStreet, neighborhood, precise: false, retryable: true,
-        error: 'Not looked up yet: the batch ran out of time. Sync again to finish placing this one.',
-      };
-    }
-
     const key = keyFor(entry);
     if (!inFlight.has(key)) inFlight.set(key, geocodeOne(entry));
     try {

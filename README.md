@@ -18,8 +18,10 @@ Netlify Function
   └── OpenRouteService   (isochrones — ORS_API_KEY)
 ```
 
-The organizer opens the Netlify URL, enters a password, and uses the tool.
-No local server, no terminal, no Google sign-in.
+The organizer runs this locally with `node server.js` and opens
+`http://localhost:3000`. `server.js` imports the same handler as the Netlify
+function, so both paths share all backend logic, but local is the path
+actually in use. Nothing is designed around a hosting invocation limit.
 
 ## Running locally (macOS / Linux)
 
@@ -43,7 +45,10 @@ GOOGLE_SERVICE_ACCOUNT_KEY_FILE=village-matcher-key.json   # path to key file
 
 See `docs/LOCAL-SETUP.md` for step-by-step organizer instructions.
 
-## Deploying to Netlify
+## Deploying to Netlify (optional)
+
+Not the path in use. The organizer runs the tool locally; this is kept only so
+the hosted option still works if it is ever wanted.
 
 All credentials are set as environment variables in the Netlify dashboard
 (never in the repo). Required variables:
@@ -252,34 +257,26 @@ a glance:
 | street level | the street exists, that house number does not |
 | area level | the street cell held only a place name, so the pin is at the centre of that district |
 
-### Batching and timeouts
+### Batching
 
 Requests are spaced globally and retried on throttling. A 300-applicant sync
 issues roughly 600 geocoder calls; without spacing, around twenty came back
 rate-limited, which looked to the organizer like people missing from the map
 for no reason. Repeated addresses within one batch are looked up once.
 
-That spacing means a batch takes time proportional to its size: 300 applicants
-measured at about 65 seconds. A Netlify function gets roughly **10 seconds per
-synchronous invocation**, so the frontend sends addresses in chunks of
-`GEOCODE_CHUNK_SIZE` (10) and waits for each before starting the next. Chunks
-are deliberately sequential: each invocation rate-limits only itself, so
-parallel chunks would multiply the request rate and bring the throttling back.
+That spacing means a sync takes time proportional to its size: 300 applicants
+measured at about 65 seconds. The frontend sends addresses in chunks of
+`GEOCODE_CHUNK_SIZE` (10) and waits for each before starting the next.
 
-The chunk size is set from the slow path, not the typical one. An address that
-resolves on the first query costs one geocoder call; one that does not exist
-runs the whole ladder, and a chunk spanning municipalities not yet cached pays
-a lookup for each. Fifteen per chunk measured right at the limit and tripped it
-for real; ten leaves headroom.
+This is not a timeout workaround. The organizer runs the backend locally with
+`node server.js`, which has no invocation limit. Chunking buys two things a
+single large call cannot: pins appear as they resolve rather than after a
+silent minute, and a failure costs ten people instead of all of them. The sync
+button reports progress while it works.
 
-`GEOCODE_TIME_BUDGET_MS` is the backstop: the backend stops starting new
-addresses shortly before the invocation would be killed and reports the ones it
-did not reach as retryable, so a slow chunk degrades into "sync again" rather
-than an opaque gateway error that drops ten people off the map.
-
-A caution for anyone measuring this: calling the handler directly from Node has
-no timeout, which is how the original 300-row figure was gathered and how the
-problem stayed hidden. Time it through the chunked path.
+Chunks are sequential on purpose. The rate limiter is per process, so running
+chunks at the same time would multiply the request rate and bring the
+throttling straight back.
 
 ## The map
 

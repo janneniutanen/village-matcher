@@ -59,13 +59,25 @@ function cacheSet(key, value) {
 // Bump this whenever a change could alter the coordinate a given address
 // resolves to. v2: geocoding stopped being restricted to Uusimaa and started
 // verifying the municipality.
-// How many addresses go in one backend call. Sized against the WORST case, not
-// the typical one: an address that resolves on the first query costs one
-// geocoder request, but one that doesn't exist runs the whole ladder, and a
-// chunk spanning municipalities not yet cached pays a lookup for each. At 15
-// per chunk that combination measured right at the backend's time budget and
-// tripped it for real, so the size is set from the slow path.
+// How many addresses go in one backend call.
+//
+// Not a timeout workaround: the organizer runs the backend locally, which has
+// no invocation limit. It is for the two things a single large call cannot do.
+// The geocoder is rate-limited, so 300 applicants take about a minute, and in
+// one call that minute is silent and all-or-nothing: a failure anywhere loses
+// every result. In chunks, finished addresses appear as they resolve and one
+// bad chunk costs ten people instead of everyone.
 const GEOCODE_CHUNK_SIZE = 10;
+
+const SYNC_BTN_LABEL = '\u21BB Sync with Google Sheet';
+
+// Geocoding 300 applicants takes about a minute, which is a long time to stare
+// at a button that only says "Syncing...". Says how far it has got instead.
+// Passing null restores the button's normal label.
+function reportSyncProgress(text) {
+  const btn = document.getElementById('syncBtn');
+  if (btn) btn.textContent = text || SYNC_BTN_LABEL;
+}
 
 const GEOCODE_CACHE_VERSION = 'v2';
 const GEOCODE_CACHE_PREFIX  = `geocode:${GEOCODE_CACHE_VERSION}:`;
@@ -226,19 +238,13 @@ async function ensureGeocoded(applicants) {
   });
   if (toFetch.length === 0) return;
 
-  // Sent in chunks, sequentially. The backend spaces its geocoder requests to
-  // stay under Digitransit's rate limit, so a batch takes time proportional to
-  // its size: 300 applicants measured at roughly 70 seconds. A Netlify
-  // function only gets about 10 seconds per synchronous invocation, so asking
-  // for all of them at once would be killed mid-flight and return nothing.
-  // Raised in review; the 300-row timing above was measured by calling the
-  // handler directly from Node, which has no such limit and hid the problem.
-  //
-  // Chunks are deliberately NOT sent in parallel: each invocation rate-limits
-  // only itself, so concurrent chunks would multiply the request rate and
-  // bring back the throttling this is all working around.
+  // Sequential, not parallel. The backend spaces its geocoder requests to stay
+  // under Digitransit's rate limit; running chunks at the same time would just
+  // multiply the request rate and bring back the throttling that made people
+  // disappear from the map in the first place.
   for (let start = 0; start < toFetch.length; start += GEOCODE_CHUNK_SIZE) {
     const chunk = toFetch.slice(start, start + GEOCODE_CHUNK_SIZE);
+    reportSyncProgress(`Placing addresses… ${start} of ${toFetch.length}`);
     try {
       // Structured, so the backend can anchor the search to the district rather
       // than hoping the geocoder respects a municipality buried in free text.
@@ -252,6 +258,7 @@ async function ensureGeocoded(applicants) {
       chunk.forEach((a) => { a.geocodeIssue = `Geocoding unavailable: ${err.message}`; });
     }
   }
+  reportSyncProgress(null);
 }
 
 function applyGeocodeResult(a, r) {
@@ -273,7 +280,7 @@ function applyGeocodeResult(a, r) {
   a.geocodedReal   = false;
   a.geocodeWarning = null;
   a.geocodeIssue   = r.error
-    ? (r.retryable ? r.error : `Address not found: ${r.error}`)
+    ? `Address not found: ${r.error}`
     : `Address only matched loosely${r.label ? ` (got "${r.label}")` : ''}, so it needs a more exact street address`;
 }
 
@@ -1132,7 +1139,7 @@ function wireControls() {
     renderSettingsTab();
     renderAll();
     btn.disabled = false;
-    btn.textContent = '↻ Sync with Google Sheet';
+    btn.textContent = SYNC_BTN_LABEL;
     if (!success) alert('Sync failed — check your connection and try again.');
   });
 
