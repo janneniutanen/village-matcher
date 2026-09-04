@@ -180,7 +180,7 @@ function buildWindow(transformSource = (src) => src) {
     getApplicant, renderCandidateCards, renderAll, waLink, syncToBackend, init,
     populateNeighborhoodFilter, renderSettingsTab,
     renderMap, groupApplicantsByLocation, focusApplicantOnMap, selectApplicantOnMap,
-    drawOverlap, travelMode,
+    showMeetingPlaces, travelMode,
   };`;
   window.document.body.appendChild(hook);
 
@@ -656,7 +656,7 @@ async function showFirstGroup(window) {
   // The suggestions are shown inside a card, so the cards must exist.
   window.__test__.renderCandidateCards();
   Object.assign(window.__leaflet__, newLeafletRecord());
-  await window.__test__.drawOverlap(groups[0].candidateId);
+  await window.__test__.showMeetingPlaces(groups[0].candidateId);
   return groups[0];
 }
 
@@ -666,7 +666,7 @@ test("UI smoke: suggesting a meeting place draws options and journey lines", asy
   const group = await showFirstGroup(window);
 
   const members = group.memberIds.map(window.__test__.getApplicant);
-  const status = window.document.getElementById('overlapStatus').textContent;
+  const status = window.document.getElementById('meetingStatus').textContent;
   assert.ok(window.__leaflet__.divIcons.length > 0,
     `expected at least one suggested place; status was ${JSON.stringify(status)}`);
   assert.ok(window.__leaflet__.divIcons.some((i) => /meeting-marker-best/.test(i.className)),
@@ -681,7 +681,7 @@ test("UI smoke: suggesting a meeting place draws options and journey lines", asy
   assert.equal(casings.length, expected, 'and a casing under each of them');
   casings.forEach((c) => assert.ok(c.opts.weight > 3, 'a casing must be wider than the line it backs'));
 
-  assert.match(window.document.getElementById('overlapStatus').textContent, /Best of|No shared meeting place/);
+  assert.match(window.document.getElementById('meetingStatus').textContent, /Best of|No shared meeting place/);
 });
 
 test("UI smoke: the members of the group being shown are ringed", async () => {
@@ -734,10 +734,10 @@ test("UI smoke: toggling the suggestions off clears the rings and the status", a
   const window = buildWindow();
   await window.__test__.init();
   await showFirstGroup(window);
-  assert.notEqual(window.document.getElementById('overlapStatus').textContent, '');
+  assert.notEqual(window.document.getElementById('meetingStatus').textContent, '');
 
-  await window.__test__.drawOverlap(null);
-  assert.equal(window.document.getElementById('overlapStatus').textContent, '',
+  await window.__test__.showMeetingPlaces(null);
+  assert.equal(window.document.getElementById('meetingStatus').textContent, '',
     'a stale status line would describe markers that are gone');
 });
 
@@ -778,7 +778,7 @@ test("UI smoke: hiding the suggestions clears them from the card", async () => {
   const host = window.document.querySelector(`.meeting-list[data-meeting-for="${group.candidateId}"]`);
   assert.equal(host.hidden, false);
 
-  await window.__test__.drawOverlap(null);
+  await window.__test__.showMeetingPlaces(null);
   assert.equal(host.hidden, true, 'a stale list would describe markers that are gone');
   assert.equal(host.innerHTML, '');
 });
@@ -787,7 +787,7 @@ test("UI smoke: the open suggestions survive a re-render of the cards", async ()
   const window = buildWindow();
   await window.__test__.init();
   const group = await showFirstGroup(window);
-  window.__test__.state.overlapVisibleFor = group.candidateId;
+  window.__test__.state.meetingPlacesFor = group.candidateId;
 
   // Approving or rejecting anything re-renders the card list. The suggestions
   // are already cached, so they should come back rather than vanish.

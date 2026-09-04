@@ -429,9 +429,9 @@ button:hover { background: var(--surface-muted); }
   text-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
 }
 .pin-count::before { display: none; }
-/* The overlap takes a few seconds and can legitimately come back empty, so it
-   reports what happened instead of leaving the map unchanged. */
-.overlap-status {
+/* Finding places takes a few seconds and can legitimately come back empty, so
+   it reports what happened instead of leaving the map unchanged. */
+.meeting-status {
   font-size: 13px;
   color: var(--text-secondary);
   background: var(--surface-muted);
@@ -439,7 +439,7 @@ button:hover { background: var(--surface-muted); }
   padding: 8px 12px;
   margin: 8px 0 0;
 }
-.overlap-status[hidden] { display: none; }
+.meeting-status[hidden] { display: none; }
 
 /* The suggestions repeated on the candidate card. The map answers "where";
    this is what gets copied into a message. */

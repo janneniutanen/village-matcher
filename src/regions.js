@@ -488,7 +488,6 @@ function pickBestCandidate(request, candidates) {
 }
 
 const Regions = {
-  DISTRICTS,
   DISTRICT_COORDS,
   MUNICIPALITY_COORDS,
   DISTRICT_RADIUS_KM,
@@ -497,7 +496,6 @@ const Regions = {
   districtCentre,
   resolveDistrict,
   municipalityOf,
-  splitAreaParts,
   areaLookupCandidates,
   looksLikePlaceNameOnly,
   normalizeStreet,
@@ -506,7 +504,6 @@ const Regions = {
   withinCountry,
   streetName,
   looksAbbreviated,
-  labelStreetNames,
   streetNameMatches,
   houseNumber,
   placeNameMatches,

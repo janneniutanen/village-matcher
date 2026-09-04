@@ -12,14 +12,6 @@ const members = [
   { id: "C", coords: [61.4978, 23.7610], maxTravel: 45 },
 ];
 
-test("groupCentre: the middle of the group", () => {
-  const centre = R.groupCentre(members);
-  assert.ok(Math.abs(centre[0] - 61.4813) < 0.001);
-  assert.ok(Math.abs(centre[1] - 23.8043) < 0.001);
-  assert.equal(R.groupCentre([]), null);
-  assert.equal(R.groupCentre(null), null);
-});
-
 test("venueSearchCircle: a fixed radius around the group centre", () => {
   // Matching already groups members who are close in travel time, so the
   // centre is somewhere they can all plausibly reach and a fixed radius is a
@@ -27,7 +19,8 @@ test("venueSearchCircle: a fixed radius around the group centre", () => {
   const circle = R.venueSearchCircle(members);
   assert.equal(circle.radiusKm, R.VENUE_SEARCH_RADIUS_KM);
   assert.equal(circle.radiusKm, 10);
-  assert.ok(Math.abs(circle.lat - 61.4813) < 0.001);
+  assert.ok(Math.abs(circle.lat - 61.4813) < 0.001, "centred on the group");
+  assert.ok(Math.abs(circle.lon - 23.8043) < 0.001);
   assert.equal(R.venueSearchCircle(members, 3).radiusKm, 3);
   assert.equal(R.venueSearchCircle([]), null);
 });
@@ -141,26 +134,31 @@ test("scorePoints: a member missing from the results is unreachable, not undefin
   assert.equal(s.perMember.find((r) => r.id === "C").minutes, null);
 });
 
-test("bestPoint: picks the kindest worst journey, not the best average", () => {
-  // A group is only as reachable as its most burdened member, so the point
+test("rankMeetingPoints: ranks on the worst journey, not the best average", () => {
+  // A group is only as reachable as its most burdened member, so the place
   // that keeps the worst journey down wins even if another has a lower total.
   const points = [{ lat: 61.48, lon: 23.80 }, { lat: 61.49, lon: 23.81 }];
   const scored = R.scorePoints(points, { A: [10, 20], B: [10, 21], C: [44, 22] }, members);
-  const best = R.bestPoint(scored);
-  assert.equal(best.worstMinutes, 22, "the 20/21/22 point beats 10/10/44");
+  const ranked = R.rankMeetingPoints(scored);
+  assert.equal(ranked[0].worstMinutes, 22, "the 20/21/22 place beats 10/10/44");
 });
 
-test("bestPoint: ties break towards less total travel", () => {
+test("rankMeetingPoints: ties break towards less total travel", () => {
+  // Real groups tie: the first live run had two options at 27 minutes and two
+  // at 25, so without this the order between them is arbitrary.
   const points = [{ lat: 61.48, lon: 23.80 }, { lat: 61.49, lon: 23.81 }];
   const scored = R.scorePoints(points, { A: [30, 10], B: [30, 10], C: [30, 30] }, members);
-  const best = R.bestPoint(scored);
-  assert.equal(best.perMember.reduce((s, r) => s + r.minutes, 0), 50);
+  const ranked = R.rankMeetingPoints(scored);
+  assert.equal(ranked[0].perMember.reduce((s, r) => s + r.minutes, 0), 50);
 });
 
-test("bestPoint: returns null rather than inventing a meeting place", () => {
+test("rankMeetingPoints: places nobody can all reach are left out entirely", () => {
   const points = [{ lat: 61.48, lon: 23.80 }, { lat: 61.49, lon: 23.81 }];
-  const scored = R.scorePoints(points, { A: [99, 99], B: [99, 99], C: [99, 99] }, members);
-  assert.equal(R.bestPoint(scored), null);
+  const scored = R.scorePoints(points, { A: [99, 10], B: [99, 10], C: [99, 30] }, members);
+  const ranked = R.rankMeetingPoints(scored);
+  assert.equal(ranked.length, 1, "the unreachable one is dropped, not ranked last");
+  assert.deepEqual(R.rankMeetingPoints([]), []);
+  assert.deepEqual(R.rankMeetingPoints(null), []);
 });
 
 test("nearestMiss: gives the refining pass somewhere to look when nothing was reachable", () => {

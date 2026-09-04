@@ -136,17 +136,15 @@ function scorePoints(points, times, members) {
   });
 }
 
-// Ties break towards less total travel.
-function bestPoint(scored) {
-  const usable = scored.filter((s) => s.reachable && s.worstMinutes !== null);
-  if (!usable.length) return null;
-
+// Everywhere the group can meet, kindest first. Ranked on the worst journey,
+// then on total travel, so two places that are equally bad for the furthest
+// member are separated by how much they ask of everyone else. Real groups do
+// tie: two options at 27 minutes and two at 25 in the first live run.
+function rankMeetingPoints(scored) {
   const total = (s) => s.perMember.reduce((sum, r) => sum + r.minutes, 0);
-  return usable.reduce((best, s) => {
-    if (s.worstMinutes < best.worstMinutes) return s;
-    if (s.worstMinutes > best.worstMinutes) return best;
-    return total(s) < total(best) ? s : best;
-  });
+  return (scored || [])
+    .filter((s) => s.reachable && s.worstMinutes !== null)
+    .sort((a, b) => a.worstMinutes - b.worstMinutes || total(a) - total(b));
 }
 
 // What came closest when nothing was reachable, so the coordinator is told
@@ -160,14 +158,12 @@ function nearestMiss(scored) {
 
 const Reachability = {
   VENUE_SEARCH_RADIUS_KM,
-  groupCentre,
   venueSearchCircle,
   groupSpreadKm,
-  VENUE_KINDS,
   shortlistVenues,
   homesAsVenues,
   scorePoints,
-  bestPoint,
+  rankMeetingPoints,
   nearestMiss,
 };
 

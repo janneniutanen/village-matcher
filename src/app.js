@@ -175,7 +175,7 @@ const state = {
     neighborhoodFilter: 'all',
   },
   activeTab:         'new-matches',
-  overlapVisibleFor: null,
+  meetingPlacesFor: null,
   nextGroupNum:      1,
   usingBackendData:  false,
   travelTimeStats: null,
@@ -455,7 +455,7 @@ function escHtml(str) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
-let map, overlapLayer, pinLayer, highlightLayer;
+let map, meetingLayer, pinLayer, highlightLayer;
 
 // Rebuilt on every renderMap.
 let markerForApplicant = new Map();
@@ -469,7 +469,7 @@ function initMap() {
   // Helsinki view left a Tampere dataset off-screen.
   map = L.map('map', { attributionControl: false }).setView([64.0, 26.0], 5);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
-  overlapLayer   = L.layerGroup().addTo(map);
+  meetingLayer   = L.layerGroup().addTo(map);
   pinLayer       = L.layerGroup().addTo(map);
   // Above the pins, so a selection ring is never hidden under a dot.
   highlightLayer = L.layerGroup().addTo(map);
@@ -655,11 +655,11 @@ async function findMeetingPoints(members) {
   return Reachability.scorePoints(candidates, times, members);
 }
 
-async function drawOverlap(candidateId) {
-  overlapLayer.clearLayers();
+async function showMeetingPlaces(candidateId) {
+  meetingLayer.clearLayers();
   // Toggling the suggestions off has to take the status line with it, or the
   // last result sits there describing markers that are no longer on the map.
-  setOverlapStatus(null);
+  setMeetingStatus(null);
   clearMeetingLists();
   if (!candidateId) return;
   const cand = state.candidateGroups.find((c) => c.candidateId === candidateId);
@@ -670,7 +670,7 @@ async function drawOverlap(candidateId) {
   const excluded = all.filter((m) => !m.coords || !m.transport.length);
 
   if (members.length < 2) {
-    setOverlapStatus('Not enough of this group has a location and a way of travelling to work out where to meet.');
+    setMeetingStatus('Not enough of this group has a location and a way of travelling to work out where to meet.');
     return;
   }
   // Silently leaving someone out would produce a meeting place that does not
@@ -685,13 +685,13 @@ async function drawOverlap(candidateId) {
 
   if (!scored) {
     // Real itineraries, so this takes a few seconds.
-    setOverlapStatus('Finding places to meet and checking real travel times\u2026');
+    setMeetingStatus('Finding places to meet and checking real travel times\u2026');
     try {
       scored = await findMeetingPoints(members);
       meetingCache.set(key, scored);
     } catch (err) {
       console.warn('Meeting point search failed:', err.message);
-      setOverlapStatus(`Could not work out where to meet: ${err.message}`);
+      setMeetingStatus(`Could not work out where to meet: ${err.message}`);
       return;
     }
   }
@@ -700,15 +700,13 @@ async function drawOverlap(candidateId) {
 }
 
 // The map answers "where", but the name and times get copied into a message,
-// and re-opening a popup for each option to compare them is painful.
+// and re-opening a popup for each option to compare them is painful. Ranked by
+// the same rule as the markers, so the two always agree.
 function renderMeetingList(candidateId, scored, members) {
   const host = document.querySelector(`.meeting-list[data-meeting-for="${cssEscape(candidateId)}"]`);
   if (!host) return;
 
-  const workable = scored
-    .filter((s) => s.reachable)
-    .sort((a, b) => a.worstMinutes - b.worstMinutes)
-    .slice(0, MEETING_OPTIONS);
+  const workable = Reachability.rankMeetingPoints(scored).slice(0, MEETING_OPTIONS);
 
   if (!workable.length) {
     const spread = Reachability.groupSpreadKm(members);
@@ -775,10 +773,7 @@ function meetingKey(option) {
 
 function renderMeetingPoints(scored, members, color, caveat = '') {
   markerForMeeting = new Map();
-  const workable = scored
-    .filter((s) => s.reachable)
-    .sort((a, b) => a.worstMinutes - b.worstMinutes)
-    .slice(0, MEETING_OPTIONS);
+  const workable = Reachability.rankMeetingPoints(scored).slice(0, MEETING_OPTIONS);
 
   // Everyone in the pool is on this map, so without this the suggestion is
   // lines reaching into an anonymous crowd of dots.
@@ -789,7 +784,7 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
     frameGroup(members, []);
     const near = Reachability.nearestMiss(scored);
     const spread = Reachability.groupSpreadKm(members);
-    setOverlapStatus(
+    setMeetingStatus(
       'No shared meeting place works for everyone within their stated travel limits. ' +
       (near ? `The closest was ${near.name}, ${Math.round(Math.max(...near.perMember.map((r) => r.minutes)))} min for the furthest member. ` : '') +
       `These members live ${spread.toFixed(1)}km apart.` + caveat
@@ -811,7 +806,7 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
         weight: primary ? 7 : 5,
         opacity: primary ? 0.9 : 0.55,
         lineCap: 'round',
-      }).addTo(overlapLayer);
+      }).addTo(meetingLayer);
 
       L.polyline(path, {
         color,
@@ -819,7 +814,7 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
         opacity: primary ? 1 : 0.65,
         dashArray: primary ? null : '5,5',
         lineCap: 'round',
-      }).addTo(overlapLayer);
+      }).addTo(meetingLayer);
     });
 
     // Square, unlike the round pins that mean people.
@@ -830,14 +825,14 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
         iconSize: [26, 26],
         iconAnchor: [13, 13],
       }),
-    }).addTo(overlapLayer).bindPopup(meetingPopup(option, rank));
+    }).addTo(meetingLayer).bindPopup(meetingPopup(option, rank));
     markerForMeeting.set(meetingKey(option), marker);
   });
 
   frameGroup(members, workable);
 
   const best = workable[0];
-  setOverlapStatus(
+  setMeetingStatus(
     `Best of ${workable.length}: ${best.name} (${Math.round(best.worstMinutes)} min for whoever travels furthest). ` +
     `Click a marker for each member's journey.` + caveat
   );
@@ -849,7 +844,7 @@ function markActiveMembers(members, color) {
   members.forEach((m) => {
     L.circleMarker(m.coords, {
       radius: 15, color, weight: 3, fill: false, dashArray: '4,3', opacity: 0.9,
-    }).addTo(overlapLayer);
+    }).addTo(meetingLayer);
   });
 }
 
@@ -903,8 +898,8 @@ function meetingPopup(option, rank) {
 
 // Written next to the map legend, because this takes a few seconds and can
 // legitimately come back empty. Both need saying somewhere visible.
-function setOverlapStatus(text) {
-  const el = document.getElementById('overlapStatus');
+function setMeetingStatus(text) {
+  const el = document.getElementById('meetingStatus');
   if (!el) return;
   el.textContent = text || '';
   el.hidden = !text;
@@ -1033,7 +1028,7 @@ function renderCandidateCards() {
       <div class="card-actions">
         <button data-action="approve" data-id="${escHtml(candidateGroup.candidateId)}">Approve</button>
         <button data-action="reject"  data-id="${escHtml(candidateGroup.candidateId)}">Reject</button>
-        <button data-action="overlap" data-id="${escHtml(candidateGroup.candidateId)}">Suggest where to meet</button>
+        <button data-action="meeting" data-id="${escHtml(candidateGroup.candidateId)}">Suggest where to meet</button>
       </div>
       <div class="meeting-list" data-meeting-for="${escHtml(candidateGroup.candidateId)}" hidden></div>`;
     container.appendChild(card);
@@ -1044,12 +1039,12 @@ function renderCandidateCards() {
   // A group whose suggestions are open stays open across a re-render. The
   // results are already cached, so this costs nothing and avoids the list
   // disappearing whenever anything else on the page changes.
-  if (state.overlapVisibleFor) {
-    const shown = state.candidateGroups.find((c) => c.candidateId === state.overlapVisibleFor);
+  if (state.meetingPlacesFor) {
+    const shown = state.candidateGroups.find((c) => c.candidateId === state.meetingPlacesFor);
     if (shown) {
       const members = shown.memberIds.map(getApplicant).filter((m) => m.coords && m.transport.length);
       const cached = meetingCache.get(meetingCacheKey(members));
-      if (cached) renderMeetingList(state.overlapVisibleFor, cached, members);
+      if (cached) renderMeetingList(state.meetingPlacesFor, cached, members);
     }
   }
 
@@ -1059,17 +1054,17 @@ function renderCandidateCards() {
       const id = btn.dataset.id;
       if (btn.dataset.action === 'approve') { btn.disabled = true; await approveGroup(id); btn.disabled = false; }
       if (btn.dataset.action === 'reject')   rejectGroup(id);
-      if (btn.dataset.action === 'overlap') {
-        const opening = state.overlapVisibleFor !== id;
-        state.overlapVisibleFor = opening ? id : null;
+      if (btn.dataset.action === 'meeting') {
+        const opening = state.meetingPlacesFor !== id;
+        state.meetingPlacesFor = opening ? id : null;
         // Finding places takes a few seconds on a cold group, so the button
         // says what it is doing rather than looking like it ignored the click.
         if (opening) { btn.disabled = true; btn.textContent = 'Looking\u2026'; }
         try {
-          await drawOverlap(state.overlapVisibleFor);
+          await showMeetingPlaces(state.meetingPlacesFor);
         } finally {
           btn.disabled = false;
-          btn.textContent = state.overlapVisibleFor === id ? 'Hide meeting places' : 'Suggest where to meet';
+          btn.textContent = state.meetingPlacesFor === id ? 'Hide meeting places' : 'Suggest where to meet';
         }
       }
     });
@@ -1370,8 +1365,8 @@ function wireControls() {
     } catch (err) {
       alert('Matching couldn\'t complete: ' + err.message);
     }
-    state.overlapVisibleFor = null;
-    overlapLayer.clearLayers();
+    state.meetingPlacesFor = null;
+    meetingLayer.clearLayers();
     renderAll();
     btn.disabled = false; btn.textContent = '▶ Run matching';
   });
