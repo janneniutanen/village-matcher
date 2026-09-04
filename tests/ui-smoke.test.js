@@ -24,12 +24,21 @@ const { JSDOM, VirtualConsole } = require("jsdom");
 const SERVER_PATH = path.join(__dirname, "..", "local-test-server.js");
 const CSV_PATH = path.join(__dirname, "..", "mock-applicants.csv");
 const PORT = 8793;
-const BASE_URL = `http://localhost:${PORT}`;
+const BASE_URL = `http://localhost:${PORT}`;   // first port; each test takes the next
 
 let serverProcess;
+// A fresh port per test. Reusing one port and sleeping 150ms for the OS to
+// release it was a race, and it lost intermittently: a test would fail with
+// EADDRINUSE, or against a server that had just been killed, and the failure
+// landed on whichever test happened to run next rather than on anything
+// actually broken.
+let nextPort = PORT;
+let baseUrl = BASE_URL;
 
 test.beforeEach(async () => {
-  serverProcess = spawn("node", [SERVER_PATH, CSV_PATH, String(PORT)], { stdio: "pipe" });
+  const port = nextPort++;
+  baseUrl = `http://localhost:${port}`;
+  serverProcess = spawn("node", [SERVER_PATH, CSV_PATH, String(port)], { stdio: "pipe" });
   await new Promise((resolve, reject) => {
     let out = "";
     const timeout = setTimeout(() => reject(new Error("Server didn't start in time:\n" + out)), 5000);
@@ -43,10 +52,8 @@ test.beforeEach(async () => {
   });
 });
 
-test.afterEach(async () => {
+test.afterEach(() => {
   serverProcess.kill();
-  // Give the OS a moment to release the port before the next test's server binds it.
-  await new Promise((r) => setTimeout(r, 150));
 });
 
 // Records what the app asked Leaflet to draw, so the map behaviour that can't
@@ -107,7 +114,7 @@ function newLeafletRecord() {
 // window's true global scope, same as a browser. Original <script src="">
 // tags (the CDN Leaflet include, and our own files) are stripped from the
 // markup first so jsdom doesn't try to fetch them over the network.
-function buildWindow() {
+function buildWindow(transformSource = (src) => src) {
   const rawHtml = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
   const htmlWithoutScripts = rawHtml.replace(/<script[^>]*src="[^"]*"[^>]*><\/script>/g, "");
   // Include ?backend= so API_URL in app.js resolves to the local server,
@@ -119,7 +126,7 @@ function buildWindow() {
   virtualConsole.on("warn",  (msg) => console.error("  [page warn]", msg));
   virtualConsole.on("error", (msg) => console.error("  [page error]", msg));
   virtualConsole.on("jsdomError", (err) => console.error("  [jsdom error]", err.message));
-  const dom = new JSDOM(htmlWithoutScripts, { url: `http://localhost/?backend=${BASE_URL}`, runScripts: "dangerously", virtualConsole });
+  const dom = new JSDOM(htmlWithoutScripts, { url: `http://localhost/?backend=${baseUrl}`, runScripts: "dangerously", virtualConsole });
   const { window } = dom;
 
   const leafletRecord = newLeafletRecord();
@@ -138,7 +145,7 @@ function buildWindow() {
   assert.ok(files.length >= 3, `expected the app's scripts in index.html, got ${files.join(", ")}`);
   files.forEach((f) => {
     const script = window.document.createElement("script");
-    script.textContent = fs.readFileSync(path.join(__dirname, "..", f), "utf8");
+    script.textContent = transformSource(fs.readFileSync(path.join(__dirname, "..", f), "utf8"));
     window.document.body.appendChild(script); // executes immediately (runScripts: "dangerously")
   });
 
@@ -386,7 +393,7 @@ test("UI smoke: approving a group persists to the backend (real HTTP round trip)
 
   // ...AND that it actually reached the server, via an independent request
   // that doesn't go through the app's own state at all.
-  const resp = await fetch(BASE_URL, {
+  const resp = await fetch(baseUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify({ action: "getApplicants" }),
@@ -414,7 +421,7 @@ test("UI smoke: advancing status through the full pipeline reaches the backend e
     memberIds.forEach((id) => window.__test__.markStatus(id, status));
   }
 
-  const resp = await fetch(BASE_URL, {
+  const resp = await fetch(baseUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify({ action: "getApplicants" }),
@@ -424,7 +431,7 @@ test("UI smoke: advancing status through the full pipeline reaches the backend e
     assert.equal(freshApplicants.find((a) => a.id === id).matchStatus, "introduced");
   });
 
-  const groupsResp = await fetch(BASE_URL, {
+  const groupsResp = await fetch(baseUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify({ action: "getGroups" }),
@@ -452,7 +459,7 @@ test("UI smoke: settings changes round-trip to the backend", async () => {
   await window.__test__.init();
   window.__test__.syncToBackend("saveSettings", { settings: { maxAgeGap: 9 } });
   await new Promise((r) => setTimeout(r, 200)); // fire-and-forget — give it a beat to land
-  const resp = await fetch(BASE_URL, {
+  const resp = await fetch(baseUrl, {
     method: "POST",
     headers: { "Content-Type": "text/plain" },
     body: JSON.stringify({ action: "getSettings" }),
@@ -651,6 +658,9 @@ async function showFirstGroup(window) {
   assert.ok(groups.length, 'the sample must produce at least one candidate group');
   // The app assigns this in the Run matching handler.
   window.__test__.state.candidateGroups = groups;
+  // The app renders the cards before anything can be clicked on them, and the
+  // suggestions are shown inside a card.
+  window.__test__.renderCandidateCards();
   Object.assign(window.__leaflet__, newLeafletRecord());
   await window.__test__.drawOverlap(groups[0].candidateId);
   return groups[0];
@@ -744,4 +754,122 @@ test("UI smoke: toggling the suggestions off clears the rings and the status", a
   await window.__test__.drawOverlap(null);
   assert.equal(window.document.getElementById('overlapStatus').textContent, '',
     'a stale status line would describe markers that are gone');
+});
+
+test("UI smoke: suggestions also appear on the candidate card, collapsed", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const group = await showFirstGroup(window);
+
+  const host = window.document.querySelector(`.meeting-list[data-meeting-for="${group.candidateId}"]`);
+  assert.ok(host, 'the candidate card needs somewhere to show the suggestions');
+  assert.equal(host.hidden, false, 'the list must be revealed after asking');
+
+  const options = host.querySelectorAll('.meeting-option');
+  assert.ok(options.length > 0, 'expected at least one suggestion on the card');
+  assert.equal(options.length, window.__leaflet__.divIcons.length, 'card and map must agree');
+
+  // Each option names the place and the longest journey without being opened,
+  // because that is what decides which one she picks.
+  const first = options[0];
+  assert.ok(first.querySelector('.meeting-name').textContent.trim().length > 0);
+  assert.match(first.querySelector('.meeting-worst').textContent, /\d+ min/);
+  assert.ok(first.classList.contains('meeting-option-best'), 'the best option should be marked');
+
+  // The per-member journeys start collapsed and open on click.
+  const legs = first.querySelector('.meeting-legs');
+  assert.equal(legs.hidden, true, 'legs start collapsed');
+  first.querySelector('.meeting-option-head').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+  assert.equal(legs.hidden, false);
+  assert.equal(
+    legs.querySelectorAll('.meeting-leg').length,
+    group.memberIds.map(window.__test__.getApplicant).filter((m) => m.coords && m.transport.length).length,
+    'one journey per member'
+  );
+});
+
+test("UI smoke: hiding the suggestions clears them from the card", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const group = await showFirstGroup(window);
+  const host = window.document.querySelector(`.meeting-list[data-meeting-for="${group.candidateId}"]`);
+  assert.equal(host.hidden, false);
+
+  await window.__test__.drawOverlap(null);
+  assert.equal(host.hidden, true, 'a stale list would describe markers that are gone');
+  assert.equal(host.innerHTML, '');
+});
+
+test("UI smoke: the open suggestions survive a re-render of the cards", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const group = await showFirstGroup(window);
+  window.__test__.state.overlapVisibleFor = group.candidateId;
+
+  // Approving or rejecting anything re-renders the card list. The suggestions
+  // are already cached, so they should come back rather than vanish.
+  window.__test__.renderCandidateCards();
+  const host = window.document.querySelector(`.meeting-list[data-meeting-for="${group.candidateId}"]`);
+  assert.equal(host.hidden, false, 'the list should be restored after a re-render');
+  assert.ok(host.querySelectorAll('.meeting-option').length > 0);
+});
+
+test("UI smoke: stripping comments for delivery does not change what renders", async () => {
+  // server.js strips whole-line comments before compressing, which takes the
+  // frontend from 99KB to 16KB over the wire with no build step. It verifies
+  // the result still parses, but parsing is not enough: a comment or blank
+  // line inside one of app.js's multi-line HTML templates is content, and
+  // removing it would change the markup while still parsing cleanly. This
+  // compares what actually renders, which is the property that matters.
+  const { stripComments } = require("../server.js");
+
+  const asWritten = buildWindow();
+  await asWritten.__test__.init();
+  const asDelivered = buildWindow(stripComments);
+  await asDelivered.__test__.init();
+
+  // The parts of the page built from template literals.
+  ["unmatchedList", "dataIssuesList", "activeGroups", "candidateCards"].forEach((id) => {
+    assert.equal(
+      asDelivered.document.getElementById(id).innerHTML,
+      asWritten.document.getElementById(id).innerHTML,
+      `${id} renders differently once comments are stripped`
+    );
+  });
+
+  // And the same applicants end up in the same state.
+  assert.equal(asDelivered.__test__.state.applicants.length, asWritten.__test__.state.applicants.length);
+  assert.equal(
+    asDelivered.__test__.state.applicants.filter((a) => a.geocodedReal).length,
+    asWritten.__test__.state.applicants.filter((a) => a.geocodedReal).length
+  );
+});
+
+test("stripComments: removes comment lines and nothing else", () => {
+  const { stripComments } = require("../server.js");
+
+  // A `//` inside a string or a regex is not a comment and must survive, which
+  // is why this drops whole lines only and never edits inside one.
+  const src = [
+    "// a comment",
+    "const url = 'https://example.com';",
+    "  // indented comment",
+    "const re = /\\/\\//;",
+    "/* block start",
+    " * continued",
+    " */",
+    "",
+    "const x = 1; // trailing comment stays, the line is code",
+  ].join("\n");
+
+  assert.equal(stripComments(src), [
+    "const url = 'https://example.com';",
+    "const re = /\\/\\//;",
+    "",
+    "const x = 1; // trailing comment stays, the line is code",
+  ].join("\n"));
+
+  // Blank lines are kept on purpose: inside a template literal they are
+  // content, and removing them saved 94 bytes after brotli.
+  assert.match(stripComments("a\n\nb"), /a\n\nb/);
 });

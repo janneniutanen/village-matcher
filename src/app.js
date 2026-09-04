@@ -629,6 +629,11 @@ function drawHighlightRing(applicantId) {
   return marker;
 }
 
+// Which map marker belongs to each suggested place, so clicking an entry in
+// the list on the card opens that marker, the same way clicking a person in a
+// list finds her pin.
+let markerForMeeting = new Map();
+
 // Rings a single person on the map and brings them into view. This is the
 // answer to "where is this person" for someone sitting under another dot: the
 // ring is drawn on top, and the popup opens on their own entry.
@@ -711,6 +716,7 @@ async function drawOverlap(candidateId) {
   // Toggling the suggestions off has to take the status line with it, or the
   // last result sits there describing markers that are no longer on the map.
   setOverlapStatus(null);
+  clearMeetingLists();
   if (!candidateId) return;
   const cand = state.candidateGroups.find((c) => c.candidateId === candidateId);
   if (!cand) return;
@@ -747,9 +753,87 @@ async function drawOverlap(candidateId) {
     }
   }
   renderMeetingPoints(scored, members, color, caveat);
+  renderMeetingList(candidateId, scored, members);
+}
+
+// The same suggestions, on the candidate card. The map answers "where", but
+// the coordinator has to copy a name and a set of travel times into a message,
+// and reading that off a popup she has to keep re-opening is painful. Each
+// entry collapses so a card with three options is still scannable.
+function renderMeetingList(candidateId, scored, members) {
+  const host = document.querySelector(`.meeting-list[data-meeting-for="${cssEscape(candidateId)}"]`);
+  if (!host) return;
+
+  const workable = scored
+    .filter((s) => s.reachable)
+    .sort((a, b) => a.worstMinutes - b.worstMinutes)
+    .slice(0, MEETING_OPTIONS);
+
+  if (!workable.length) {
+    const spread = Reachability.groupSpreadKm(members);
+    host.innerHTML = `<div class="meeting-empty">Nowhere works for everyone within their own travel limits. ` +
+      `These members live ${escHtml(spread.toFixed(1))}km apart.</div>`;
+    host.hidden = false;
+    return;
+  }
+
+  host.innerHTML = `<div class="meeting-list-head">Places everyone can reach</div>` +
+    workable.map((option, rank) => {
+      const rows = option.perMember.map((r) => {
+        const who = getApplicant(r.id);
+        const mode = who ? MODE_ICON[travelMode(who)] || '' : '';
+        return `<div class="meeting-leg"><span>${mode} ${escHtml(who ? who.name : r.id)}</span>` +
+          `<span>${Math.round(r.minutes)} min <span class="meeting-limit">of ${escHtml(r.limit)}</span></span></div>`;
+      }).join('');
+
+      return `<div class="meeting-option${rank === 0 ? ' meeting-option-best' : ''}" data-meeting-key="${escHtml(meetingKey(option))}">
+        <button class="meeting-option-head" type="button" aria-expanded="false">
+          <span class="meeting-icon">${VENUE_ICON[option.kind] || '\u{1F4CD}'}</span>
+          <span class="meeting-name">${escHtml(option.name)}</span>
+          <span class="meeting-kind">${escHtml(VENUE_LABEL[option.kind] || option.kind || 'place')}</span>
+          <span class="meeting-worst">${Math.round(option.worstMinutes)} min</span>
+        </button>
+        <div class="meeting-legs" hidden>${rows}
+          <button class="meeting-locate" type="button">Show on map</button>
+        </div>
+      </div>`;
+    }).join('');
+
+  host.hidden = false;
+
+  host.querySelectorAll('.meeting-option-head').forEach((head) => {
+    head.addEventListener('click', () => {
+      const legs = head.nextElementSibling;
+      const open = !legs.hidden;
+      legs.hidden = open;
+      head.setAttribute('aria-expanded', String(!open));
+    });
+  });
+
+  host.querySelectorAll('.meeting-locate').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.closest('.meeting-option').dataset.meetingKey;
+      const marker = markerForMeeting.get(key);
+      if (!marker) return;
+      map.setView(marker.getLatLng(), Math.max(map.getZoom(), 14), { animate: true });
+      marker.openPopup();
+    });
+  });
+}
+
+function clearMeetingLists() {
+  document.querySelectorAll('.meeting-list').forEach((el) => {
+    el.hidden = true;
+    el.innerHTML = '';
+  });
+}
+
+function meetingKey(option) {
+  return `${option.lat.toFixed(5)},${option.lon.toFixed(5)}`;
 }
 
 function renderMeetingPoints(scored, members, color, caveat = '') {
+  markerForMeeting = new Map();
   const workable = scored
     .filter((s) => s.reachable)
     .sort((a, b) => a.worstMinutes - b.worstMinutes)
@@ -808,7 +892,7 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
     });
 
     // A square marker, deliberately unlike the round pins that mean people.
-    L.marker([option.lat, option.lon], {
+    const marker = L.marker([option.lat, option.lon], {
       icon: L.divIcon({
         className: 'meeting-marker' + (primary ? ' meeting-marker-best' : ''),
         html: `<span style="border-color:${escHtml(color)}">${VENUE_ICON[option.kind] || '\u{1F4CD}'}</span>`,
@@ -816,6 +900,7 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
         iconAnchor: [13, 13],
       }),
     }).addTo(overlapLayer).bindPopup(meetingPopup(option, rank));
+    markerForMeeting.set(meetingKey(option), marker);
   });
 
   frameGroup(members, workable);
@@ -1025,11 +1110,24 @@ function renderCandidateCards() {
         <button data-action="approve" data-id="${escHtml(candidateGroup.candidateId)}">Approve</button>
         <button data-action="reject"  data-id="${escHtml(candidateGroup.candidateId)}">Reject</button>
         <button data-action="overlap" data-id="${escHtml(candidateGroup.candidateId)}">Suggest where to meet</button>
-      </div>`;
+      </div>
+      <div class="meeting-list" data-meeting-for="${escHtml(candidateGroup.candidateId)}" hidden></div>`;
     container.appendChild(card);
   });
 
   attachApplicantDetailToggles(container);
+
+  // A group whose suggestions are open stays open across a re-render. The
+  // results are already cached, so this costs nothing and avoids the list
+  // disappearing whenever anything else on the page changes.
+  if (state.overlapVisibleFor) {
+    const shown = state.candidateGroups.find((c) => c.candidateId === state.overlapVisibleFor);
+    if (shown) {
+      const members = shown.memberIds.map(getApplicant).filter((m) => m.coords && m.transport.length);
+      const cached = meetingCache.get(meetingCacheKey(members));
+      if (cached) renderMeetingList(state.overlapVisibleFor, cached, members);
+    }
+  }
 
   container.querySelectorAll('button[data-action]').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -1038,8 +1136,17 @@ function renderCandidateCards() {
       if (btn.dataset.action === 'approve') { btn.disabled = true; await approveGroup(id); btn.disabled = false; }
       if (btn.dataset.action === 'reject')   rejectGroup(id);
       if (btn.dataset.action === 'overlap') {
-        state.overlapVisibleFor = state.overlapVisibleFor === id ? null : id;
-        await drawOverlap(state.overlapVisibleFor);
+        const opening = state.overlapVisibleFor !== id;
+        state.overlapVisibleFor = opening ? id : null;
+        // Finding places takes a few seconds on a cold group, so the button
+        // says what it is doing rather than looking like it ignored the click.
+        if (opening) { btn.disabled = true; btn.textContent = 'Looking\u2026'; }
+        try {
+          await drawOverlap(state.overlapVisibleFor);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = state.overlapVisibleFor === id ? 'Hide meeting places' : 'Suggest where to meet';
+        }
       }
     });
   });
