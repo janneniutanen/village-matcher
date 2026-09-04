@@ -378,40 +378,22 @@ async function sheetSaveSettings(settings) {
 // ---------------------------------------------------------------------------
 // Geocoding — Digitransit Pelias API
 // ---------------------------------------------------------------------------
-// Digitransit's geocoder covers all of Finland, but it treats the query as
-// free text: it discards the municipality and fuzzy-matches the street name
-// nationally, so "Jokikatu 11, Porvoo" comes back as Jokikatu 11 in Joensuu,
-// 400km away, at 0.96 confidence. Confidence is therefore useless for
-// catching this.
+// The geocoder treats the query as free text: it discards the municipality and
+// fuzzy-matches the street nationally, so "Jokikatu 11, Porvoo" comes back as
+// Jokikatu 11 in Joensuu at 0.96 confidence. Confidence cannot catch this.
 //
-// The previous version fought that by passing a Uusimaa-shaped `boundary.rect`
-// and rejecting anything outside a radius of a hand-kept district centre. Both
-// halves broke as soon as the tool was pointed at Tampere:
-//
-//   * The rect clipped Pirkanmaa out of the result set, so the only candidates
-//     left for a Tampere street were same-named streets in Uusimaa. Every one
-//     of eight sample Tampere addresses came back in Helsinki, Hyvinkää,
-//     Espoo, Salo or Järvenpää.
-//   * A district name in the query text can return zero results outright:
-//     "Vaasankatu 5, Kallio" finds nothing while "Vaasankatu 5, Helsinki" is
-//     an exact hit. That is why addresses Google resolves fine never appeared.
-//
-// So: search nationally, ask several differently-phrased questions rather than
-// one, and do the verifying ourselves on the way out, at MUNICIPALITY level.
-// Street names repeat across Finland but are effectively unique within a
-// municipality, which makes the municipality the check that actually works.
-// Regions.scoreCandidate holds that logic and is unit-tested without network.
+// So search nationally and verify the answer here, at municipality level.
+// Never constrain the search to a sub-region: a Uusimaa `boundary.rect` used
+// to clip Pirkanmaa out of the results, leaving only same-named Uusimaa
+// streets for every Tampere address. Regions.scoreCandidate holds the
+// verification and is unit-tested without network.
 const GEOCODE_URL = 'https://api.digitransit.fi/geocoding/v1/search';
 
-// How many applicants to geocode at once. One request per applicant with no
-// limit is fine for a dozen rows and gets rate-limited at a few hundred, which
-// showed up as a handful of people mysteriously missing from the map.
 const GEOCODE_CONCURRENCY = 6;
 
-// Digitransit rate-limits per key, and a 300-applicant sync overran it: 20-odd
-// people came back as "geocoder unavailable" purely because the batch was
-// large. Requests are spaced globally rather than per worker, so the ceiling
-// holds however many workers are running.
+// Digitransit rate-limits per key. Unspaced, a 300-applicant sync had 20-odd
+// people fail as "geocoder unavailable" purely because the batch was large.
+// Spaced globally, not per worker, so the ceiling holds at any concurrency.
 const MIN_REQUEST_SPACING_MS = 110;
 
 let _nextRequestSlot = 0;
@@ -431,17 +413,15 @@ function digitransitKey() {
   return key;
 }
 
-// Rate limiting and the occasional 502 are expected on a shared public API, so
-// they are retried rather than surfaced as "address not found", since a transient
-// failure and a bad address need different reactions from the organizer.
+// Retried rather than surfaced as "address not found": a transient failure and
+// a bad address need different reactions from the organizer.
 async function geocoderSearch(params, attempt = 0) {
   await awaitRequestSlot();
   const resp = await fetch(`${GEOCODE_URL}?${new URLSearchParams(params)}`, {
     headers: { 'digitransit-subscription-key': digitransitKey() },
   });
   if ((resp.status === 429 || resp.status >= 500) && attempt < 5) {
-    // Jittered, so workers that were throttled together don't all come back
-    // at the same moment and throttle each other again.
+    // Jittered, or workers throttled together retry in lockstep.
     await sleep(500 * 2 ** attempt + Math.random() * 250);
     return geocoderSearch(params, attempt + 1);
   }
@@ -449,9 +429,8 @@ async function geocoderSearch(params, attempt = 0) {
   return resp.json();
 }
 
-// Pelias features carry the administrative hierarchy of a hit as properties.
-// Those, not the coordinates, are what tell us whether it is in the right
-// place, so they are lifted into the flat shape Regions.scoreCandidate takes.
+// The administrative fields, not the coordinates, are what say whether a hit
+// is in the right place.
 function toCandidate(feature) {
   const [lon, lat] = feature.geometry.coordinates;
   const p = feature.properties || {};
@@ -467,10 +446,9 @@ function toCandidate(feature) {
   };
 }
 
-// Municipality names resolved from the geocoder's own localadmin layer, so any
-// of Finland's 309 municipalities works without a hand-kept table. Cached for
-// the life of the warm Lambda: municipality names do not change, and a batch
-// of 300 applicants usually spans only a handful of them.
+// Resolved from the geocoder's own localadmin layer, so all 309 municipalities
+// work without a hand-kept table. Names do not change, so cached for the life
+// of the process.
 const _municipalityCache = new Map();
 
 async function resolveMunicipalityName(name) {
@@ -484,9 +462,8 @@ async function resolveMunicipalityName(name) {
     const data = await geocoderSearch({
       text: trimmed, size: '5', layers: 'localadmin', 'boundary.country': 'FIN',
     });
-    // Exact name equality only. A fuzzy localadmin hit is exactly the failure
-    // mode being defended against: "Hervanta" ranks "Herva, Ii" first, 600km
-    // north, and anchoring on that would be worse than having no anchor.
+    // Exact equality only. A fuzzy hit is the failure being defended against:
+    // "Hervanta" ranks "Herva, Ii" first, 600km north.
     const hit = (data.features || []).find((f) =>
       Regions.placeNameMatches(trimmed, f.properties.localadmin) ||
       Regions.placeNameMatches(trimmed, f.properties.name));
@@ -495,26 +472,17 @@ async function resolveMunicipalityName(name) {
       resolved = { name: hit.properties.localadmin || hit.properties.name, coords: [lat, lon] };
     }
   } catch (err) {
-    // A lookup failure must not decide the address's fate; verification just
-    // falls back to matching the area name against the hit's own fields.
-    //
-    // Deliberately NOT cached. "Tampere is not a municipality" and "the
-    // network blipped while asking about Tampere" are indistinguishable here,
-    // and this cache lives as long as the warm container: caching the second
-    // would degrade every remaining applicant in the batch, and every future
-    // batch on the same container, to the weaker check for no reason.
+    // Deliberately not cached. "Not a municipality" and "the network blipped"
+    // are indistinguishable here, and this cache outlives the request, so
+    // caching the second would degrade every later batch too.
     return null;
   }
-  // Only a definitive answer is cached: a name either is a municipality or
-  // demonstrably isn't, and neither changes.
   _municipalityCache.set(key, resolved);
   return resolved;
 }
 
-// What the Neighbourhood cell actually refers to. The curated table answers
-// instantly and maps a district to its city ("Hervanta" -> Tampere); anything
-// it doesn't know is put to the geocoder, one comma-separated part at a time,
-// so "Kaleva, Tampere" still finds Tampere.
+// The curated table maps a district to its city ("Hervanta" -> Tampere);
+// anything it does not know is put to the geocoder.
 async function resolveArea(areaRaw) {
   const known = Regions.resolveDistrict(areaRaw);
   if (known) return { municipality: known.municipality, centre: known.coords };
@@ -526,11 +494,9 @@ async function resolveArea(areaRaw) {
   return { municipality: null, centre: null };
 }
 
-// Several phrasings of the same address, most specific first. The ladder
-// exists because Pelias is inconsistent about qualifiers: a district name can
-// pin the right city ("Insinöörinkatu 60, Hervanta" is exact) or return
-// nothing at all ("Vaasankatu 5, Kallio"). Appending the municipality rescues
-// the second case, and asking bare street-only last covers a mis-typed area.
+// Pelias is inconsistent about qualifiers: a district name can pin the right
+// city ("Insinöörinkatu 60, Hervanta" is exact) or return nothing at all
+// ("Vaasankatu 5, Kallio"). Appending the municipality rescues the second.
 function buildQueries(street, area, municipality) {
   const queries = [];
   const push = (text) => { if (text && !queries.includes(text)) queries.push(text); };
@@ -557,15 +523,11 @@ async function geocodeOne(entry) {
   if (!street.trim()) return { ...base, precise: false, error: 'no street address given' };
 
   // A Street address column holding "Kaleva" or "Tampere": a place, not an
-  // address. No geocoder can place that to a house, but the place itself is
-  // known, so the person goes on the map at its centre and is labelled as
-  // such. Refusing outright is what dropped people off the map entirely; a
-  // dot at the centre of their district is both honest and usable for a
-  // travel-time radius, and the organizer can see it needs fixing.
+  // address. Placed at the centre of that place and labelled, because refusing
+  // outright dropped people off the map entirely.
   const placeOnlyStreet = Regions.looksLikePlaceNameOnly(street) ? Regions.resolveDistrict(street) : null;
   if (placeOnlyStreet) {
-    // Whichever of the two cells is more specific: a district beats the city
-    // it sits in, wherever the organizer happened to type it.
+    // A district beats the city it sits in, whichever cell it was typed in.
     const areaAnchor = Regions.resolveDistrict(neighborhood);
     const anchor = placeOnlyStreet.kind === 'district' ? placeOnlyStreet
       : (areaAnchor && areaAnchor.kind === 'district' ? areaAnchor : placeOnlyStreet);
@@ -594,8 +556,8 @@ async function geocodeOne(entry) {
   }
 
   const common = { size: '15', 'boundary.country': 'FIN' };
-  // focus.point only re-ranks results, it never excludes them, so biasing
-  // towards the expected city is safe in a way boundary.rect was not.
+  // focus.point re-ranks, it never excludes, so it is safe in a way
+  // boundary.rect was not.
   if (centre) {
     common['focus.point.lat'] = String(centre[0]);
     common['focus.point.lon'] = String(centre[1]);
@@ -618,16 +580,12 @@ async function geocodeOne(entry) {
     if (best) break;
   }
 
-  // Last resort: accept the street without a house number, if it is in the
-  // verified municipality. A pin at the right street in the right city is
-  // usable for a 30-minute travel radius and far better than dropping someone
-  // off the map, but it is reported so the organizer can decide.
+  // Last resort: the street without a house number, if it is in the verified
+  // municipality. Reported, so the organizer can decide.
   let precision = 'exact';
   if (!best) {
-    // Only the most specific phrasing is retried at street level. Re-running
-    // the whole ladder here tripled the request count for exactly the rows
-    // least likely to resolve, which is what pushed a 300-row batch over the
-    // rate limit.
+    // Only the most specific phrasing. Re-running the whole ladder tripled the
+    // request count for the rows least likely to resolve.
     const [mostSpecific] = buildQueries(street, neighborhood, municipality);
     try {
       const data = await geocoderSearch({ ...common, text: mostSpecific, layers: 'street' });
@@ -641,8 +599,8 @@ async function geocodeOne(entry) {
 
   if (!best) {
     if (lastError) return { ...withBase, precise: false, error: `geocoder unavailable: ${lastError}` };
-    // Report what it did come back with, because "no such street here" and "right
-    // street, wrong city" need different fixes in the sheet.
+    // "No such street here" and "right street, wrong city" need different
+    // fixes in the sheet.
     const nearby = seen.find((c) => c.label);
     return {
       ...withBase,
@@ -655,9 +613,8 @@ async function geocodeOne(entry) {
 
   if (precision === 'exact' && best.houseDelta !== null && best.houseDelta > 0) precision = 'approximate';
 
-  // A house number tens of doors from the one asked for is a different part of
-  // a long street, so it is worth saying out loud even though the pin is
-  // close enough to match on.
+  // Tens of doors away is a different part of a long street, even though the
+  // pin is close enough to match on.
   const warning = precision === 'street'
     ? `placed at street level, because "${street}" has no exact house number in the address register`
     : best.houseDelta !== null && best.houseDelta > 20
@@ -680,9 +637,8 @@ async function geocodeOne(entry) {
   };
 }
 
-// Bounded concurrency rather than Promise.all over the whole batch: 300
-// applicants firing at once gets throttled, and a throttled request that
-// slipped through as a failure looked to the organizer like a missing person.
+// Bounded rather than Promise.all over the whole batch, which got throttled at
+// 300 applicants and looked like missing people.
 async function mapWithConcurrency(items, limit, fn) {
   const results = new Array(items.length);
   let cursor = 0;
@@ -700,8 +656,8 @@ async function geocodeBatch(entries) {
   digitransitKey();
   const list = entries || [];
 
-  // Mothers who live at the same address are common and the point of the tool,
-  // so a batch repeats addresses. Each distinct one is looked up once.
+  // Mothers at the same address are the point of the tool, so batches repeat
+  // addresses. Each distinct one is looked up once.
   const inFlight = new Map();
   const keyFor = (entry) => typeof entry === 'string'
     ? entry
@@ -865,21 +821,14 @@ async function transitMinutes(from, to, departure = representativeDeparture()) {
 // ---------------------------------------------------------------------------
 // Meeting venues, from OpenStreetMap
 // ---------------------------------------------------------------------------
-// Somewhere a group of mothers with a baby can actually meet. Digitransit's
-// geocoder does have a `venue` layer, but it returns no category at all, so a
-// search around Tampere centre comes back with a mix of hairdressers, kebab
-// shops and a theatre with nothing to tell them apart. Useless for picking a
-// place to take a pram.
-//
-// OpenStreetMap has the tags for exactly this, and Overpass will answer a
-// bounding-box query for them: around Tampere it finds 872 playgrounds, 681
-// parks, 53 community centres and 14 shopping malls, named.
+// Digitransit's geocoder has a `venue` layer but returns no category, so a
+// search comes back with hairdressers and kebab shops and no way to tell them
+// apart. OpenStreetMap has the tags.
 const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
 const OVERPASS_USER_AGENT = 'village-matcher (janne.niutanen@cgi.com)';
 
-// Malls are here because of the winter. An outdoor meeting is not an option
-// for a good few months of a Finnish year, and a mall is warm, free, has a
-// lift and somewhere to feed a baby.
+// Malls because of the winter: warm, free, a lift, and somewhere to feed a
+// baby.
 const OVERPASS_TAGS = [
   ['leisure', 'playground'],
   ['leisure', 'park'],
@@ -887,29 +836,24 @@ const OVERPASS_TAGS = [
   ['shop', 'mall'],
 ];
 
-// Overpass is a free, shared, community-run service, so results are cached for
-// the life of the process and the box is rounded to keep near-identical groups
-// on the same cache entry.
+// Overpass is free and community-run, so results are cached for the life of
+// the process.
 const _venueCache = new Map();
 
-// Rounded, so two groups centred a few hundred metres apart share one entry
-// rather than each paying for its own Overpass query.
+// Rounded, so nearby groups share one entry.
 function venueCacheKey(circle) {
   return `${circle.lat.toFixed(2)},${circle.lon.toFixed(2)},${circle.radiusKm}`;
 }
 
-// Overpass is free and community-run, and it sheds load when busy: the same
-// query that answers in 2s with 1688 elements returns 504 minutes later. That
-// is normal operation for it, not a bug to be surprised by, so retry a couple
-// of times and let the caller carry on without venues if it stays down.
+// Overpass sheds load when busy: the same query that answers in 2s can return
+// 504 minutes later. Normal operation for it, so retry and let the caller
+// carry on without venues if it stays down.
 async function overpassFetch(query, attempt = 0) {
   const resp = await fetch(OVERPASS_URL, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/x-www-form-urlencoded',
-      // Overpass answers 406 Not Acceptable without one. It is also their
-      // etiquette policy: a shared service is entitled to know who is calling
-      // it and how to reach them.
+      // Overpass answers 406 Not Acceptable without one.
       'User-Agent': OVERPASS_USER_AGENT,
     },
     body: new URLSearchParams({ data: query }),
@@ -922,10 +866,8 @@ async function overpassFetch(query, attempt = 0) {
   if (!resp.ok) throw new Error(`Overpass returned HTTP ${resp.status}`);
 
   const data = await resp.json();
-  // Overpass reports its own timeouts and capacity limits in `remark`, with
-  // HTTP 200 and an empty element list. Unchecked, that is indistinguishable
-  // from "there are no playgrounds near this group", which would quietly
-  // reduce every suggestion to the members' own homes.
+  // Overpass reports its own timeouts in `remark` with HTTP 200 and no
+  // elements, which is otherwise indistinguishable from "nothing near here".
   if (data.remark) throw new Error(`Overpass: ${String(data.remark).slice(0, 160)}`);
   return data;
 }
@@ -936,14 +878,9 @@ async function meetingVenues(circle) {
   const key = venueCacheKey({ ...circle, radiusKm });
   if (_venueCache.has(key)) return _venueCache.get(key);
 
-  // A box, not Overpass's own `around:` circle. `around:` is the natural way to
-  // say this and it works for nodes, but combined with `way` elements it goes
-  // from answering in 2 seconds to timing out at 40 and returning nothing at
-  // all, because it has to test every way's geometry against the circle.
-  // Playgrounds and parks are mapped as areas, so that is most of the data.
-  //
-  // The box is a little generous at the corners; the caller trims to the true
-  // radius, which is exact and free.
+  // A box, not Overpass's `around:`. That works for nodes but times out at 40s
+  // returning nothing once `way` elements are included, and parks and
+  // playgrounds are mapped as areas. The caller trims to the true radius.
   const dLat = radiusKm / 111.32;
   const dLon = radiusKm / (111.32 * Math.cos((circle.lat * Math.PI) / 180));
   const bbox = [
@@ -951,14 +888,9 @@ async function meetingVenues(circle) {
     circle.lat + dLat, circle.lon + dLon,
   ].map((n) => n.toFixed(5)).join(',');
 
-  // Both nodes and ways, because a playground is usually mapped as an area,
-  // and `out center` reduces each to a single point so the caller does not
-  // have to handle polygons.
-  //
-  // Named places only. Two thirds of OSM playgrounds have no name and are no
-  // use here, since a mother cannot be told to meet at an unnamed polygon.
-  // Filtering server-side cut the reply from 1688 elements to 644 rather than
-  // downloading the difference in order to discard it.
+  // Nodes and ways both, since a playground is usually an area; `out center`
+  // reduces each to a point. Named only: two thirds have no name and filtering
+  // server-side cut the reply from 1688 elements to 644.
   const clauses = OVERPASS_TAGS
     .flatMap(([k, v]) => [`node["${k}"="${v}"]["name"](${bbox});`, `way["${k}"="${v}"]["name"](${bbox});`])
     .join('\n  ');

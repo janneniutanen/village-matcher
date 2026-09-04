@@ -136,9 +136,8 @@ function fakeGeocode(entries) {
       return { street: rawStreet, neighborhood, queried: street, precise: false, error: "district not recognised" };
     }
     const h = stableHash(street + "|" + anchor.name);
-    // Every fourth address lands on a neighbour's coordinates, so the map's
-    // shared-pin handling gets exercised offline. People at one address were
-    // invisible under each other in production and no local run showed it.
+    // Every fourth address collides, so the map's shared-pin handling is
+    // exercised offline. It was not, and that shipped a bug.
     const collide = h % 4 === 0;
     const jitterLat = collide ? 0 : (((h % 1000) / 1000) - 0.5) * 0.01;
     const jitterLon = collide ? 0 : ((((h >> 10) % 1000) / 1000) - 0.5) * 0.02;
@@ -173,10 +172,8 @@ function fakeTravelTime(pairs) {
     return { id: p.id, minutes: Math.max(1, estimate * (1 + jitter)), _fake: true };
   });
 }
-// Travel times from several origins to several candidate meeting points, the
-// offline twin of the real batched routing query. Distance- and mode-aware for
-// the same reason fakeTravelTime is: a stub that ignored geography made the
-// ranking of meeting places meaningless when testing locally.
+// Distance- and mode-aware for the same reason fakeTravelTime is: a stub that
+// ignored geography made the ranking of meeting places meaningless offline.
 function fakeTravelTimeGrid(origins, points) {
   const out = {};
   (origins || []).forEach((origin) => {
@@ -184,9 +181,8 @@ function fakeTravelTimeGrid(origins, points) {
       const km = MatchingEngine.haversineKm([origin.lat, origin.lon], [point.lat, point.lon]);
       const estimate = MatchingEngine.estimateTravelTime(km, origin.mode);
       if (!isFinite(estimate)) return null;
-      // The real router returns nothing when a journey is not possible, and
-      // that is a hard exclusion downstream, so the stub has to be capable of
-      // saying it too. Walking 20km is the honest case for it.
+      // The real router returns nothing for an impossible journey, and that is
+      // a hard exclusion downstream, so the stub has to be able to say it too.
       if (origin.mode === "W" && km > 20) return null;
       const jitter = ((stableHash(origin.id + point.lat) % 21) - 10) / 100; // ±10%
       return Math.max(1, estimate * (1 + jitter));
@@ -195,17 +191,14 @@ function fakeTravelTimeGrid(origins, points) {
   return out;
 }
 
-// Plausible places to meet, laid out around the group so the shortlisting and
-// ranking have something with spread to work on. Named after the real OSM tags
-// they stand in for, and clearly fake so nobody mistakes them for data.
 const FAKE_VENUE_KINDS = ["playground", "park", "community_centre", "mall"];
 
 function fakeMeetingVenues(circle) {
   if (!circle) return [];
   const radiusDeg = (circle.radiusKm || 10) / 111.32;
   const venues = [];
-  // A ring of venues at a couple of distances, cycling through the kinds, so
-  // the round-robin shortlist and the separation rule both get exercised.
+  // Two rings, cycling through the kinds, so the round-robin shortlist and the
+  // separation rule are both exercised.
   [0.35, 0.7].forEach((scale, band) => {
     for (let i = 0; i < 8; i++) {
       const angle = (i / 8) * 2 * Math.PI + band * 0.4;
@@ -678,9 +671,7 @@ async function start() {
   });
 }
 
-// Only when run as a program. This file also exports parseCsv, and binding a
-// port just because someone required it meant a test that wanted the parser
-// got an EADDRINUSE collision with the server it had already spawned.
+// So a test can import parseCsv without colliding with the server it spawned.
 if (require.main === module) {
   start().catch((err) => { console.error(err); process.exit(1); });
 }

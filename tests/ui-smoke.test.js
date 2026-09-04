@@ -27,11 +27,9 @@ const PORT = 8793;
 const BASE_URL = `http://localhost:${PORT}`;   // first port; each test takes the next
 
 let serverProcess;
-// A fresh port per test. Reusing one port and sleeping 150ms for the OS to
-// release it was a race, and it lost intermittently: a test would fail with
-// EADDRINUSE, or against a server that had just been killed, and the failure
-// landed on whichever test happened to run next rather than on anything
-// actually broken.
+// A fresh port per test. Reusing one and sleeping 150ms for the OS to release
+// it was a race that lost intermittently, and the failure landed on whichever
+// test ran next rather than on anything broken.
 let nextPort = PORT;
 let baseUrl = BASE_URL;
 
@@ -56,9 +54,8 @@ test.afterEach(() => {
   serverProcess.kill();
 });
 
-// Records what the app asked Leaflet to draw, so the map behaviour that can't
-// be seen in the DOM (how many pins, which ones share a spot, whether the
-// view was framed) is still assertable without a browser.
+// Records what the app asked Leaflet to draw, so map behaviour that is not in
+// the DOM is still assertable without a browser.
 function fakeLeaflet(record) {
   function chainable(extra = {}) {
     const obj = {
@@ -96,6 +93,28 @@ function fakeLeaflet(record) {
     },
     latLngBounds: (coords) => { record.bounds.push(coords); return { coords }; },
   };
+}
+
+// Applicant writes are fire-and-forget by design: app.js updates local state
+// immediately and posts in the background so the UI never waits on a round
+// trip. Asserting on the server the instant after an approval is therefore a
+// race, and it lost intermittently on a loaded machine. Poll instead.
+async function waitForServer(check, describe) {
+  const deadline = Date.now() + 4000;
+  let last;
+  while (Date.now() < deadline) {
+    const resp = await fetch(baseUrl, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify({ action: "getApplicants" }),
+    });
+    const { result } = await resp.json();
+    last = result;
+    if (check(result)) return result;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.fail(`${describe} did not reach the server within 4s`);
+  return last;
 }
 
 function newLeafletRecord() {
@@ -137,10 +156,9 @@ function buildWindow(transformSource = (src) => src) {
   window.navigator.clipboard = { writeText: async () => {} };
   window.localStorage.setItem("matcherPassword", "test");
 
-  // Read from index.html rather than listed here, so adding a script to the
-  // page cannot leave these tests loading a different set. reachability.js was
-  // added to the page and not to this list, and every meeting-point test
-  // failed with "Reachability is not defined" for no visible reason.
+  // Read from index.html, so adding a script to the page cannot leave these
+  // tests loading a different set. That happened, and every meeting-point
+  // test failed with "Reachability is not defined".
   const files = [...rawHtml.matchAll(/<script src="(src\/[^"]+)"><\/script>/g)].map((m) => m[1]);
   assert.ok(files.length >= 3, `expected the app's scripts in index.html, got ${files.join(", ")}`);
   files.forEach((f) => {
@@ -391,14 +409,12 @@ test("UI smoke: approving a group persists to the backend (real HTTP round trip)
     assert.equal(window.__test__.getApplicant(id).matchStatus, "match_found");
   });
 
-  // ...AND that it actually reached the server, via an independent request
-  // that doesn't go through the app's own state at all.
-  const resp = await fetch(baseUrl, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain" },
-    body: JSON.stringify({ action: "getApplicants" }),
-  });
-  const { result: freshApplicants } = await resp.json();
+  // ...AND that it reached the server, read back independently of the app's
+  // own state.
+  const freshApplicants = await waitForServer(
+    (rows) => memberIds.every((id) => rows.find((a) => a.id === id)?.matchStatus === "match_found"),
+    "the approved members"
+  );
   memberIds.forEach((id) => {
     const a = freshApplicants.find((a) => a.id === id);
     assert.equal(a.matchStatus, "match_found", `expected ${id} to be match_found on the server`);
@@ -421,12 +437,10 @@ test("UI smoke: advancing status through the full pipeline reaches the backend e
     memberIds.forEach((id) => window.__test__.markStatus(id, status));
   }
 
-  const resp = await fetch(baseUrl, {
-    method: "POST",
-    headers: { "Content-Type": "text/plain" },
-    body: JSON.stringify({ action: "getApplicants" }),
-  });
-  const { result: freshApplicants } = await resp.json();
+  const freshApplicants = await waitForServer(
+    (rows) => memberIds.every((id) => rows.find((a) => a.id === id)?.matchStatus === "introduced"),
+    "the advanced statuses"
+  );
   memberIds.forEach((id) => {
     assert.equal(freshApplicants.find((a) => a.id === id).matchStatus, "introduced");
   });
@@ -482,8 +496,7 @@ test("UI smoke: people at the same address share one pin, labelled with the coun
   const spots  = window.__test__.groupApplicantsByLocation(placed);
   const shared = spots.filter((s) => s.people.length > 1);
 
-  // The Leaflet stub's clearLayers is a no-op, so the record holds every
-  // render init did. Start clean and draw once.
+  // The stub's clearLayers is a no-op, so start clean and draw once.
   Object.assign(window.__leaflet__, newLeafletRecord());
   window.__test__.renderMap();
 
@@ -492,7 +505,6 @@ test("UI smoke: people at the same address share one pin, labelled with the coun
   assert.equal(spots.reduce((n, s) => n + s.people.length, 0), placed.length);
   assert.ok(spots.length < placed.length, "shared addresses must collapse into fewer pins");
 
-  // The count is what makes a hidden person discoverable.
   const counts = window.__leaflet__.tooltips.map((t) => Number(t.text));
   assert.ok(counts.length > 0, "expected a count label on at least one shared pin");
   // Joined, because arrays built inside the jsdom realm are not
@@ -501,7 +513,6 @@ test("UI smoke: people at the same address share one pin, labelled with the coun
     counts.slice().sort((a, b) => a - b).join(","),
     shared.map((s) => s.people.length).sort((a, b) => a - b).join(",")
   );
-  // And the popup names everyone standing on that pin, not just the first.
   const sharedMarker = window.__leaflet__.markers.find((m) => m.tooltip);
   assert.match(sharedMarker.popupHtml, /people at this address/);
 });
@@ -510,8 +521,7 @@ test("UI smoke: the map frames itself around the pins rather than a fixed city",
   const window = buildWindow();
   await window.__test__.init();
 
-  // The opening view was hardcoded to Helsinki at zoom 12, which left a
-  // Tampere dataset entirely off-screen.
+  // The opening view was hardcoded to Helsinki, which left Tampere off-screen.
   assert.equal(window.__leaflet__.fitBounds.length, 1, "expected the view to be fitted to the pins once");
   const framed = window.__leaflet__.bounds[0];
   assert.ok(framed.length > 1);
@@ -530,13 +540,11 @@ test("UI smoke: clicking a person in a list rings them on the map", async () => 
   assert.equal(window.__test__.focusApplicantOnMap(target.id), true);
   assert.equal(window.__leaflet__.openedPopups.length, before + 1, "the person's popup should open");
 
-  // A highlight ring, drawn unfilled so the dot underneath stays visible.
   const ring = window.__leaflet__.markers.filter((m) => m.opts && m.opts.fill === false).pop();
   assert.ok(ring, "expected a highlight ring");
   assert.equal(ring.coords.lat ?? ring.coords[0], target.coords[0]);
   assert.equal(ring.coords.lng ?? ring.coords[1], target.coords[1]);
 
-  // And it brings the person into view without zooming back out.
   const lastView = window.__leaflet__.setViews.pop();
   assert.ok(lastView, "expected the map to move to the person");
   assert.ok(lastView[1] >= 12, "focusing must not zoom further out than the current view");
@@ -548,7 +556,6 @@ test("UI smoke: an un-geocoded person gets no map affordance and no crash", asyn
 
   const stranded = window.__test__.state.applicants.find((a) => !a.geocodedReal);
   assert.ok(stranded, "the sample must contain someone who cannot be placed");
-  // Returns false rather than throwing, so a click on a flagged row is inert.
   assert.equal(window.__test__.focusApplicantOnMap(stranded.id), false);
   assert.equal(window.__test__.focusApplicantOnMap("no-such-id"), false);
 });
@@ -565,7 +572,6 @@ test("UI smoke: a located row is marked selected so the list and map agree", asy
   card.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
   assert.ok(card.classList.contains("selected"), "the clicked row should be marked selected");
 
-  // Expanding details must still work and must not steal the click.
   const other = [...unmatched.querySelectorAll(".applicant-card.locatable")][1];
   if (other) {
     other.querySelector(".id-toggle").dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
@@ -580,16 +586,13 @@ test("UI smoke: the highlight survives a re-render", async () => {
   const target = window.__test__.state.applicants.find((a) => !a.hasDataIssues && a.geocodedReal && a.coords);
   window.__test__.focusApplicantOnMap(target.id);
 
-  // Approving a group or running matching re-renders the map, which clears
-  // every layer. The ring has to come back, or it disappears the moment
-  // anything else on the page changes.
+  // A re-render clears every layer, so the ring has to come back.
   Object.assign(window.__leaflet__, newLeafletRecord());
   window.__test__.renderMap();
 
   const ring = window.__leaflet__.markers.find((m) => m.opts && m.opts.fill === false);
   assert.ok(ring, "the ring should be redrawn after a re-render");
   assert.equal(ring.coords.lat ?? ring.coords[0], target.coords[0]);
-  // Re-rendering must not move the view; the organizer may have panned away.
   assert.equal(window.__leaflet__.setViews.length, 0);
 });
 
@@ -599,11 +602,8 @@ test("UI smoke: expecting mothers are matched and marked as expecting", async ()
 
   const expecting = window.__test__.state.applicants.filter((a) => a.expecting);
   assert.ok(expecting.length > 0, "the sample must contain mothers who have not given birth yet");
-  // They are ordinary applicants, not a flagged special case; joining before
-  // the birth is the point.
   assert.ok(expecting.some((a) => a.eligibleForMatching), "expecting mothers must be eligible for matching");
 
-  // Their date reads as a due date rather than a birthday wherever it shows.
   const withCard = expecting.find((a) => !a.hasDataIssues && a.geocodedReal && a.matchStatus === "unmatched");
   if (withCard) {
     const row = window.document.querySelector(`#unmatchedList .applicant-card[data-applicant-id="${withCard.id}"]`);
@@ -615,12 +615,9 @@ test("UI smoke: expecting mothers are matched and marked as expecting", async ()
 });
 
 test("UI smoke: the browser scripts declare no colliding globals", () => {
-  // index.html loads these as classic script tags, which share one global
-  // lexical scope. A duplicate top-level name is a SyntaxError that stops the
-  // whole file executing, and the symptom appears somewhere else entirely:
-  // reachability.js destructuring `haversineKm` collided with the function of
-  // that name in matching-engine.js, and the app reported it as
-  // "Reachability is not defined".
+  // Classic script tags share one global lexical scope, so a duplicate
+  // top-level name is a SyntaxError that stops the whole file executing and
+  // surfaces somewhere else entirely. That happened with `haversineKm`.
   const declarations = (file) => {
     const names = new Set();
     fs.readFileSync(path.join(__dirname, "..", file), "utf8").split("\n").forEach((line) => {
@@ -628,14 +625,12 @@ test("UI smoke: the browser scripts declare no colliding globals", () => {
       if (m) names.add(m[1]);
       m = line.match(/^(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/);
       if (m) names.add(m[1]);
-      // Destructuring at column 0, which is how the collision arrived.
-      m = line.match(/^const\s*\{\s*([^}]+)\}/);
+        m = line.match(/^const\s*\{\s*([^}]+)\}/);
       if (m) m[1].split(",").forEach((n) => names.add(n.trim().split(":")[0]));
     });
     return names;
   };
 
-  // The same files, in the same order, that index.html pulls in.
   const html = fs.readFileSync(path.join(__dirname, "..", "index.html"), "utf8");
   const files = [...html.matchAll(/<script src="(src\/[^"]+)"><\/script>/g)].map((m) => m[1]);
   assert.ok(files.length >= 3, `expected the app's own scripts, found ${files.join(", ")}`);
@@ -658,8 +653,7 @@ async function showFirstGroup(window) {
   assert.ok(groups.length, 'the sample must produce at least one candidate group');
   // The app assigns this in the Run matching handler.
   window.__test__.state.candidateGroups = groups;
-  // The app renders the cards before anything can be clicked on them, and the
-  // suggestions are shown inside a card.
+  // The suggestions are shown inside a card, so the cards must exist.
   window.__test__.renderCandidateCards();
   Object.assign(window.__leaflet__, newLeafletRecord());
   await window.__test__.drawOverlap(groups[0].candidateId);
@@ -678,10 +672,8 @@ test("UI smoke: suggesting a meeting place draws options and journey lines", asy
   assert.ok(window.__leaflet__.divIcons.some((i) => /meeting-marker-best/.test(i.className)),
     'the best option must be marked as such');
 
-  // One journey line from every member to every option, so it is visible who
-  // travels furthest rather than only where the meeting is. Each is drawn
-  // twice, a pale casing under a coloured line, to stay legible over the
-  // basemap, so count the coloured ones.
+  // Each line is drawn twice, a casing under a coloured line, so count the
+  // coloured ones.
   const coloured = window.__leaflet__.polylines.filter((l) => l.opts.color !== '#FFFFFF');
   const casings  = window.__leaflet__.polylines.filter((l) => l.opts.color === '#FFFFFF');
   const expected = members.length * window.__leaflet__.divIcons.length;
@@ -698,14 +690,11 @@ test("UI smoke: the members of the group being shown are ringed", async () => {
   const group = await showFirstGroup(window);
   const members = group.memberIds.map(window.__test__.getApplicant).filter((m) => m.coords);
 
-  // Dashed, unfilled rings: one per member, so the group is picked out of the
-  // rest of the pool rather than being lines reaching into a crowd of dots.
   const rings = window.__leaflet__.markers.filter(
     (m) => m.opts && m.opts.fill === false && m.opts.dashArray
   );
   assert.equal(rings.length, members.length, 'one ring per member of the shown group');
 
-  // And they sit on the members, not somewhere else.
   // Joined, because arrays produced inside the jsdom realm are not
   // reference-equal to arrays built here even when their contents match.
   const ringKeys = rings.map((r) => `${r.coords[0]},${r.coords[1]}`).sort().join(' ');
@@ -717,8 +706,7 @@ test("UI smoke: the map zooms to the group, not the whole country", async () => 
   const window = buildWindow();
   await window.__test__.init();
 
-  // The pool-wide framing from init, captured before showFirstGroup resets
-  // the record.
+  // Captured before showFirstGroup resets the record.
   const poolBounds = window.__leaflet__.bounds[0];
   const poolSpan = Math.max(...poolBounds.map((c) => c[0])) - Math.min(...poolBounds.map((c) => c[0]));
 
@@ -727,7 +715,6 @@ test("UI smoke: the map zooms to the group, not the whole country", async () => 
 
   assert.equal(window.__leaflet__.fitBounds.length, 1, 'showing a group must reframe the map once');
 
-  // The framing covers every member, so nobody in the group is off-screen.
   const framed = window.__leaflet__.bounds[window.__leaflet__.bounds.length - 1];
   const lats = framed.map((c) => c[0]);
   const lons = framed.map((c) => c[1]);
@@ -738,9 +725,7 @@ test("UI smoke: the map zooms to the group, not the whole country", async () => 
       `${m.id} is outside the framed longitudes`);
   });
 
-  // Tighter than the pool-wide view: the sample spans the country, one group
-  // does not, and leaving the map framed over everyone is what made the
-  // meeting markers a few indistinguishable pixels.
+  // The sample spans the country; one group does not.
   assert.ok(Math.max(...lats) - Math.min(...lats) < poolSpan,
     'a group must frame tighter than the whole pool');
 });
@@ -769,14 +754,12 @@ test("UI smoke: suggestions also appear on the candidate card, collapsed", async
   assert.ok(options.length > 0, 'expected at least one suggestion on the card');
   assert.equal(options.length, window.__leaflet__.divIcons.length, 'card and map must agree');
 
-  // Each option names the place and the longest journey without being opened,
-  // because that is what decides which one she picks.
+  // Readable without opening, because this is what decides which she picks.
   const first = options[0];
   assert.ok(first.querySelector('.meeting-name').textContent.trim().length > 0);
   assert.match(first.querySelector('.meeting-worst').textContent, /\d+ min/);
   assert.ok(first.classList.contains('meeting-option-best'), 'the best option should be marked');
 
-  // The per-member journeys start collapsed and open on click.
   const legs = first.querySelector('.meeting-legs');
   assert.equal(legs.hidden, true, 'legs start collapsed');
   first.querySelector('.meeting-option-head').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
@@ -815,12 +798,9 @@ test("UI smoke: the open suggestions survive a re-render of the cards", async ()
 });
 
 test("UI smoke: stripping comments for delivery does not change what renders", async () => {
-  // server.js strips whole-line comments before compressing, which takes the
-  // frontend from 99KB to 16KB over the wire with no build step. It verifies
-  // the result still parses, but parsing is not enough: a comment or blank
-  // line inside one of app.js's multi-line HTML templates is content, and
-  // removing it would change the markup while still parsing cleanly. This
-  // compares what actually renders, which is the property that matters.
+  // server.js verifies the stripped result parses, but parsing is not enough:
+  // a line inside one of app.js's HTML templates is content, and removing it
+  // would change the markup while still parsing. This compares what renders.
   const { stripComments } = require("../server.js");
 
   const asWritten = buildWindow();
@@ -828,7 +808,6 @@ test("UI smoke: stripping comments for delivery does not change what renders", a
   const asDelivered = buildWindow(stripComments);
   await asDelivered.__test__.init();
 
-  // The parts of the page built from template literals.
   ["unmatchedList", "dataIssuesList", "activeGroups", "candidateCards"].forEach((id) => {
     assert.equal(
       asDelivered.document.getElementById(id).innerHTML,
@@ -837,7 +816,6 @@ test("UI smoke: stripping comments for delivery does not change what renders", a
     );
   });
 
-  // And the same applicants end up in the same state.
   assert.equal(asDelivered.__test__.state.applicants.length, asWritten.__test__.state.applicants.length);
   assert.equal(
     asDelivered.__test__.state.applicants.filter((a) => a.geocodedReal).length,
@@ -848,8 +826,7 @@ test("UI smoke: stripping comments for delivery does not change what renders", a
 test("stripComments: removes comment lines and nothing else", () => {
   const { stripComments } = require("../server.js");
 
-  // A `//` inside a string or a regex is not a comment and must survive, which
-  // is why this drops whole lines only and never edits inside one.
+  // A `//` inside a string or regex is not a comment and must survive.
   const src = [
     "// a comment",
     "const url = 'https://example.com';",
@@ -869,7 +846,6 @@ test("stripComments: removes comment lines and nothing else", () => {
     "const x = 1; // trailing comment stays, the line is code",
   ].join("\n"));
 
-  // Blank lines are kept on purpose: inside a template literal they are
-  // content, and removing them saved 94 bytes after brotli.
+  // Blank lines are kept: inside a template literal they are content.
   assert.match(stripComments("a\n\nb"), /a\n\nb/);
 });

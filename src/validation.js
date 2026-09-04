@@ -70,15 +70,13 @@ function parseLanguages(raw) {
   return result;
 }
 
-// A rolling application means "youngest child" could occasionally be a couple
-// of years old by the time a group forms, so the backward window is generous.
+// A rolling application, so a "youngest child" can be a couple of years old by
+// the time a group forms.
 const DOB_MAX_YEARS_PAST = 5;
 
-// Expecting mothers are matched on purpose: the point of a village is to be in
-// place before the birth, when it is needed most and there is least energy to
-// go looking for one. So the date in this column is a due date as often as a
-// birthday, and ten months covers a full pregnancy from the earliest a due
-// date is known, while still catching a fat-finger year typo like "2205".
+// Mothers are matched before the birth on purpose, so this column holds a due
+// date as often as a birthday. Ten months covers a full pregnancy while still
+// catching a fat-finger year like "2205".
 const DOB_MAX_MONTHS_AHEAD = 10;
 
 // Accepts a JS Date, ISO "YYYY-MM-DD", "DD.MM.YYYY", or "DD/MM/YYYY". Returns a Date or null.
@@ -109,8 +107,6 @@ function parseDob(raw) {
   }
   if (!d || isNaN(d.getTime())) return null;
 
-  // Sanity range only; it is not trying to be strict about exact cutoffs,
-  // just to reject a date nobody could have meant.
   const now = new Date();
   const earliest = new Date(now.getFullYear() - DOB_MAX_YEARS_PAST, now.getMonth(), now.getDate());
   const latest   = new Date(now.getFullYear(), now.getMonth() + DOB_MAX_MONTHS_AHEAD, now.getDate());
@@ -119,11 +115,9 @@ function parseDob(raw) {
   return d;
 }
 
-// True when the date is still ahead of us, i.e. a due date rather than a
-// birthday. The matching engine needs no special case for this, since it compares
-// months between members, and two due dates a month apart are a month apart
-// exactly like two birthdays. But a coordinator writing to someone does need
-// to know, so it is surfaced rather than left implicit in the date.
+// A due date rather than a birthday. The matching engine needs no special case
+// (it compares months between members either side of today), but a coordinator
+// writing to someone does.
 function isExpecting(dob, now = new Date()) {
   if (!(dob instanceof Date) || isNaN(dob.getTime())) return false;
   return dob.getTime() > now.getTime();
@@ -232,9 +226,6 @@ function normalizeApplicant(raw) {
   if (maxTravel === null) errors.push(`Missing or invalid max travel time: ${invalidValue(raw.maxTravel)}`);
 
   const dob = parseDob(raw.dob);
-  // Named as a birth OR due date, since both are accepted and a coordinator
-  // reading "(youngest child)" against an expecting mother's mistyped due
-  // date has no idea what the tool wanted.
   if (dob === null) errors.push(`Missing or invalid birth date or due date: ${invalidValue(raw.dob)}`);
 
   const phone = normalizePhone(raw.phone);

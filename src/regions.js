@@ -1,35 +1,18 @@
-// ============================================================================
-// Village Matcher: Finnish place reference
+// Finnish place reference, and the check that a geocoder hit is believable.
 //
-// Everything here exists to answer one question: given a street the organizer
-// typed and an area name next to it, which of the many Finnish addresses that
-// fuzzy-match that street is the right one?
+// The geocoder treats a query as free text: it discards the municipality and
+// fuzzy-matches the street nationally, so confidence says nothing about
+// whether a hit is in the right place. The rule here is that a hit is only
+// believable if the MUNICIPALITY matches. Street names repeat across Finland
+// (Hameenkatu is in Tampere and Hyvinkaa; Hirvikummuntie in Kangasala and
+// Tervola) but are effectively unique within one.
 //
-// Digitransit's geocoder is a Pelias instance over the national address
-// register. It covers all of Finland, but it treats the whole query as free
-// text: it will happily ignore the municipality and return a street of a
-// similar name 400km away at 0.96 confidence. So the confidence score cannot
-// be trusted, and the work of picking the right hit is ours.
-//
-// The rule this module encodes: a hit is only believable if the MUNICIPALITY
-// matches. Street names repeat across Finland (Hämeenkatu exists in Tampere
-// and Hyvinkää; Hirvikummuntie in Kangasala and Tervola) but they are
-// effectively unique within a municipality, so the municipality is the
-// disambiguator that actually works. Radius checks against hand-kept
-// coordinates were the previous approach and they do not survive the move out
-// of Uusimaa (see the note on COUNTRY_BOUNDS below).
-//
-// The coordinate tables are NOT the verification mechanism any more. They are
-// used for two narrower jobs: biasing the geocoder's ranking towards the right
-// part of the country, and letting the offline dev geocoder in
-// local-test-server.js place people without any network calls. A place missing
-// from them is not a failure; the live path resolves municipalities from the
-// geocoder itself.
-// ============================================================================
+// The coordinate tables are NOT the verification. They bias the geocoder's
+// ranking and let the offline dev geocoder place people without a network. A
+// place missing from them is not a failure.
 
-// City districts, with the municipality each one belongs to. The parent is the
-// load-bearing half: it turns "Hervanta" into "Tampere", which is what a hit
-// gets verified against.
+// The municipality is the load-bearing half: it turns "Hervanta" into
+// "Tampere", which is what a hit gets verified against.
 const DISTRICTS = {
   // Helsinki
   "Kallio"        : { coords: [60.1841, 24.9502], municipality: "Helsinki" },
@@ -64,8 +47,7 @@ const DISTRICTS = {
   "Aviapolis"     : { coords: [60.3120, 24.9640], municipality: "Vantaa" },
   "Hakunila"      : { coords: [60.2740, 25.0940], municipality: "Vantaa" },
   "Martinlaakso"  : { coords: [60.2760, 24.8460], municipality: "Vantaa" },
-  // Tampere, the region this tool is being rolled out to next, so its
-  // districts are worth having by name rather than leaning on the geocoder.
+  // Tampere
   "Keskusta"      : { coords: [61.4978, 23.7610], municipality: "Tampere" },
   "Kyttälä"       : { coords: [61.4960, 23.7720], municipality: "Tampere" },
   "Tammela"       : { coords: [61.5010, 23.7780], municipality: "Tampere" },
@@ -103,16 +85,13 @@ const DISTRICTS = {
   "Kaakkuri"      : { coords: [64.9600, 25.4800], municipality: "Oulu" },
 };
 
-// Kept in the original name -> [lat, lon] shape, because the offline dev
-// geocoder and the tests both index into it directly.
+// name -> [lat, lon], which the offline geocoder and tests index directly.
 const DISTRICT_COORDS = Object.fromEntries(
   Object.entries(DISTRICTS).map(([name, d]) => [name, d.coords])
 );
 
-// Municipalities. Not exhaustive; Finland has 309 and hand-keeping them all
-// would rot. The live geocode path resolves any municipality by name straight
-// from the geocoder's own localadmin layer, so this table only needs to cover
-// the offline dev geocoder and give the ranking something to bias towards.
+// Not exhaustive: Finland has 309 and the live path resolves any of them from
+// the geocoder's localadmin layer. This only covers the offline geocoder.
 const MUNICIPALITY_COORDS = {
   // Capital region
   "Helsinki": [60.1699, 24.9384],
@@ -192,20 +171,15 @@ const MUNICIPALITY_COORDS = {
   "Tornio":       [65.8480, 24.1440],
 };
 
-// How far a hit may sit from the centre we know for its area before the
-// ranking stops treating the area as corroborating evidence. These are soft
-// signals now, not filters: a false negative here used to mean an applicant
-// silently vanished from the map, which is worse than a slightly odd pin.
+// Soft signals, not filters. A false negative here used to make an applicant
+// vanish from the map, which is worse than a slightly odd pin.
 const DISTRICT_RADIUS_KM = 12;
 const MUNICIPALITY_RADIUS_KM = 22;
 
-// Finland's bounding box, used only as a last-ditch sanity check that a
-// coordinate is in the country at all. The predecessor of this constant was a
-// Uusimaa-shaped rectangle passed to the geocoder as a hard `boundary.rect`,
-// which is what put four of Lisa's Tampere applicants in Helsinki, Hyvinkää
-// and Kouvola: Pirkanmaa was clipped out of the result set entirely, so the
-// only candidates left to return were same-named streets in Uusimaa. Never
-// constrain the geocoder to a sub-region again; constrain the ANSWER instead.
+// A sanity check that a coordinate is in the country at all. Its predecessor
+// was a Uusimaa rectangle passed to the geocoder as a hard `boundary.rect`,
+// which clipped Pirkanmaa out of the results and put Tampere applicants in
+// Helsinki. Never constrain the search to a sub-region; constrain the answer.
 const COUNTRY_BOUNDS = { minLat: 59.5, maxLat: 70.2, minLon: 19.0, maxLon: 31.7 };
 
 // ---------------------------------------------------------------------------
@@ -277,9 +251,8 @@ function resolveDistrict(neighborhood) {
   return wordHits.find((h) => h.kind === "district") || wordHits[0] || null;
 }
 
-// True when the street cell holds a place name and no street at all, e.g. "Tampere"
-// in the Street address column. Worth naming precisely, because it is a
-// different fix for the organizer than a misspelled street.
+// "Tampere" in the Street address column. A different fix for the organizer
+// than a misspelled street.
 function looksLikePlaceNameOnly(street) {
   const cleaned = String(street || "").trim();
   if (!cleaned || /\d/.test(cleaned)) return false;
@@ -290,11 +263,8 @@ function splitAreaParts(value) {
   return String(value || "").split(/[,/|()]/).map((p) => p.trim()).filter(Boolean);
 }
 
-// Every reading of the Neighbourhood cell worth trying, most specific first.
-// The cell is free text and gets filled in as "Pirkkala Kyösti" or "Hervanta
-// Tampere" as readily as with a comma, so a separator-only split misses the
-// city that is sitting right there. Short tokens are dropped: they are
-// prepositions and abbreviations, not place names.
+// The cell is free text: "Pirkkala Kyösti" is as likely as a comma, so a
+// separator-only split misses the city sitting right there.
 function areaLookupCandidates(value) {
   const whole = String(value || "").trim();
   const parts = splitAreaParts(value);
@@ -359,8 +329,6 @@ function normalizeStreet(raw) {
 // is only ever loaded in Node, so the require is safe.
 const distanceKm = require("./matching-engine.js").haversineKm;
 
-// Takes the whole anchor rather than just its centre, because a municipality
-// anchor is coarser than a district one and needs its own radius.
 function withinAnchor(anchor, point) {
   if (!anchor || !anchor.coords) return false;
   const radius = anchor.radiusKm || DISTRICT_RADIUS_KM;
@@ -390,10 +358,8 @@ function streetName(value) {
 // district — "Sellonkuja 4" resolving to "Elonkuja 4". Being in the right area
 // isn't enough; the street has to be the one that was asked for. Differing
 // house numbers are fine, since the geocoder returns the nearest known number.
-// Every street name a label offers. Renamed streets are carried in the
-// register with the former name in brackets ("Vanha Helsingintie 11
-// (Latokartanontie 11)"), and a resident who writes the old name is not
-// wrong, so both spellings count as the same street.
+// Renamed streets carry the former name in brackets ("Vanha Helsingintie 11
+// (Latokartanontie 11)"), and a resident writing the old name is not wrong.
 function labelStreetNames(resolvedLabel) {
   const first = String(resolvedLabel || "").split(",")[0];
   const names = [streetName(first.replace(/\s*\([^)]*\)/g, " "))];
@@ -401,9 +367,8 @@ function labelStreetNames(resolvedLabel) {
   return names.filter(Boolean);
 }
 
-// "Vaasank." is a normal way to write Vaasankatu. An abbreviation is visible
-// in the text: a letter followed by a full stop. The digit case ("3. linja")
-// is an ordinal street name, not a truncation, so it is excluded.
+// A letter followed by a full stop. The digit case ("3. linja") is an ordinal
+// street name, not a truncation.
 function looksAbbreviated(street) {
   return /[a-zäöå]\./i.test(String(street || ""));
 }
@@ -413,26 +378,20 @@ function streetNameMatches(requested, resolvedLabel) {
   const want    = streetName(cleaned);
   if (want === "") return false;
 
-  // Prefix leniency is only extended to a request that is visibly an
-  // abbreviation. It used to apply to any pair sharing a five-character stem
-  // in either direction, which in a country full of compound street names
-  // accepted outright different streets: "Kauppatori 5" matched
-  // "Kauppatorinkatu 5", "Rantatie 10" matched "Rantatiensuu 10". Those are
-  // wrong pins in the right city, which is the failure this module exists to
-  // stop. Raised in review; the previous rule was never exercised by a real
-  // address in either the sample or the live sheet.
+  // Only for a visibly abbreviated request. Applying it to any shared
+  // five-character stem accepted different streets in a country full of
+  // compound names: "Kauppatori 5" matched "Kauppatorinkatu 5".
   const abbreviated = looksAbbreviated(cleaned);
 
   return labelStreetNames(resolvedLabel).some((got) => {
     if (want === got) return true;
-    // One direction only: the address register spells names out in full, so
-    // it is always the request that may be the truncated one.
+    // One direction only: the register spells names out, so only the request
+    // can be truncated.
     return abbreviated && want.length >= 5 && got.startsWith(want);
   });
 }
 
-// The house number, as a number, from a street or a geocoder label. Takes the
-// LAST number in the first segment, so "3. linja 5" reads as 5 and not 3.
+// The LAST number in the first segment, so "3. linja 5" reads as 5, not 3.
 function houseNumber(value) {
   const segment = String(value || "").split(",")[0];
   const numbers = segment.match(/\d+/g);
@@ -440,8 +399,7 @@ function houseNumber(value) {
   return Number(numbers[numbers.length - 1]);
 }
 
-// Compares two place names the same tolerant way the index does, so "Ylojarvi"
-// from a form matches "Ylöjärvi" from the geocoder.
+// So "Ylojarvi" from a form matches "Ylöjärvi" from the geocoder.
 function placeNameMatches(a, b) {
   if (!a || !b) return false;
   return foldedKey(a) === foldedKey(b);
@@ -450,16 +408,10 @@ function placeNameMatches(a, b) {
 // ---------------------------------------------------------------------------
 // Choosing between the geocoder's candidates
 // ---------------------------------------------------------------------------
-// A candidate is { lat, lon, label, localadmin, locality, neighbourhood,
-// borough, confidence }: the fields Pelias returns that say where a hit is
-// administratively, rather than just geometrically.
-//
-// The request is { street, area, municipality } where `municipality` is what
-// we managed to establish for the area, and may be null.
-//
-// Returns the best believable candidate with a `score` and `reasons`, or null
-// if none of them can be verified. Refusing to answer is a valid outcome: a
-// flagged row the organizer can fix beats a pin in the wrong city.
+// candidate: { lat, lon, label, localadmin, locality, neighbourhood, borough,
+// confidence }. request: { street, area, municipality }, municipality may be
+// null. Returns null if nothing verifies, which is a valid outcome: a flagged
+// row the organizer can fix beats a pin in the wrong city.
 function scoreCandidate(request, candidate) {
   const { street, area, municipality } = request;
   if (!candidate || typeof candidate.lat !== "number" || typeof candidate.lon !== "number") return null;
@@ -467,18 +419,11 @@ function scoreCandidate(request, candidate) {
   if (!streetNameMatches(street, candidate.label)) return null;
 
   const areaFields = [candidate.neighbourhood, candidate.borough, candidate.locality, candidate.localadmin];
-  // `localadmin` is the municipality proper; `locality` is the postal town,
-  // which is NOT the same thing. Parts of Kangasala have a Tampere postal
-  // town, so accepting either field let a Kangasala street verify as Tampere,
-  // the exact class of error this whole module exists to prevent.
-  //
-  // So `locality` is never consulted for the municipality check, not even
-  // when `localadmin` is missing. Falling back to it in that case would
-  // quietly reopen the same hole for whichever hits happen to lack the field.
-  // Digitransit populates `localadmin` on every Finnish address and street
-  // feature observed, so this costs nothing in practice; if a feature ever
-  // arrives without it, the hit drops to the area-name check below rather
-  // than being verified against the wrong kind of place.
+  // `localadmin` is the municipality; `locality` is the postal town, which is
+  // not the same thing. Parts of Kangasala have a Tampere postal town, so
+  // accepting either let a Kangasala street verify as Tampere. `locality` is
+  // never used here, not even when `localadmin` is missing: a hit without it
+  // drops to the area-name check below instead.
   const cityField = candidate.localadmin;
   const reasons = [];
 
@@ -500,16 +445,14 @@ function scoreCandidate(request, candidate) {
 
   let score = 100;
 
-  // A district-level name match is stronger evidence than the municipality
-  // alone: it says the hit is in the right part of a big city.
+  // Stronger evidence than the municipality alone: the right part of a city.
   if (area && !placeNameMatches(area, municipality) && areaFields.some((f) => placeNameMatches(area, f))) {
     score += 25;
     reasons.push("district matches");
   }
 
-  // The house number. An exact match is the strongest single signal; a near
-  // miss is normal (the register only knows numbers that exist), but a hit
-  // 50 houses away is a different part of the street.
+  // A near miss is normal, the register only knows numbers that exist, but 50
+  // houses away is a different part of the street.
   const wantNum = houseNumber(normalizeStreet(street));
   const gotNum  = houseNumber(candidate.label);
   let houseDelta = null;
@@ -522,9 +465,8 @@ function scoreCandidate(request, candidate) {
   // An exact street-name equality beats a prefix match.
   if (streetName(normalizeStreet(street)) === streetName(String(candidate.label).split(",")[0])) score += 10;
 
-  // Corroboration from the coordinates we happen to keep for this area. A
-  // bonus only, never a filter, so a missing or stale centre cannot make an
-  // applicant disappear.
+  // A bonus only, never a filter, so a stale centre cannot make an applicant
+  // disappear.
   const anchor = resolveDistrict(area);
   if (anchor && withinAnchor(anchor, [candidate.lat, candidate.lon])) {
     score += 15;
@@ -536,8 +478,6 @@ function scoreCandidate(request, candidate) {
   return { ...candidate, score, reasons, houseDelta, exactHouseNumber: houseDelta === 0 };
 }
 
-// Picks the highest-scoring believable candidate out of everything the query
-// ladder turned up. Duplicates across queries are fine; they score the same.
 function pickBestCandidate(request, candidates) {
   let best = null;
   for (const candidate of candidates || []) {

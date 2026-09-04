@@ -50,35 +50,23 @@ function cacheSet(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage full */ }
 }
 
-// Geocode results are cached in localStorage and never expire, which is right:
-// an address does not move. But it means a coordinate the backend got WRONG is
-// also kept forever, and the browser that reported the wrong-city bug is
-// holding exactly those results. Shipping a geocoder fix without changing this
-// prefix would leave the old pins on her map with no way to tell why.
-//
-// Bump this whenever a change could alter the coordinate a given address
-// resolves to. v2: geocoding stopped being restricted to Uusimaa and started
-// verifying the municipality.
-// How many addresses go in one backend call.
-//
-// Not a timeout workaround: the organizer runs the backend locally, which has
-// no invocation limit. It is for the two things a single large call cannot do.
-// The geocoder is rate-limited, so 300 applicants take about a minute, and in
-// one call that minute is silent and all-or-nothing: a failure anywhere loses
-// every result. In chunks, finished addresses appear as they resolve and one
-// bad chunk costs ten people instead of everyone.
+// Not a timeout workaround; the backend runs locally. Chunking is so pins
+// appear as they resolve rather than after a silent minute, and so one failed
+// chunk costs ten people instead of everyone.
 const GEOCODE_CHUNK_SIZE = 10;
 
 const SYNC_BTN_LABEL = '\u21BB Sync with Google Sheet';
 
-// Geocoding 300 applicants takes about a minute, which is a long time to stare
-// at a button that only says "Syncing...". Says how far it has got instead.
 // Passing null restores the button's normal label.
 function reportSyncProgress(text) {
   const btn = document.getElementById('syncBtn');
   if (btn) btn.textContent = text || SYNC_BTN_LABEL;
 }
 
+// Cached results never expire, which is right for an address, but it means a
+// coordinate the backend got WRONG is kept forever too. Bump this whenever a
+// change could alter what an address resolves to, or the fix never reaches a
+// browser holding the old answer.
 const GEOCODE_CACHE_VERSION = 'v2';
 const GEOCODE_CACHE_PREFIX  = `geocode:${GEOCODE_CACHE_VERSION}:`;
 
@@ -86,9 +74,6 @@ function geocodeCacheKey(applicant) {
   return `${GEOCODE_CACHE_PREFIX}${applicant.street}, ${applicant.neighborhood}`;
 }
 
-// Superseded entries would otherwise sit in localStorage forever, and the
-// store is small enough that filling it with dead keys eventually costs a
-// working cache. Runs once per load.
 function pruneStaleGeocodeCache() {
   try {
     const stale = [];
@@ -238,10 +223,8 @@ async function ensureGeocoded(applicants) {
   });
   if (toFetch.length === 0) return;
 
-  // Sequential, not parallel. The backend spaces its geocoder requests to stay
-  // under Digitransit's rate limit; running chunks at the same time would just
-  // multiply the request rate and bring back the throttling that made people
-  // disappear from the map in the first place.
+  // Sequential, not parallel: the backend rate-limits per process, so
+  // concurrent chunks would just multiply the request rate.
   for (let start = 0; start < toFetch.length; start += GEOCODE_CHUNK_SIZE) {
     const chunk = toFetch.slice(start, start + GEOCODE_CHUNK_SIZE);
     reportSyncProgress(`Placing addresses… ${start} of ${toFetch.length}`);
@@ -252,8 +235,7 @@ async function ensureGeocoded(applicants) {
       const results   = await callBackend('geocode', { addresses });
       results.forEach((r, i) => applyGeocodeResult(chunk[i], r));
     } catch (err) {
-      // One failed chunk must not abandon the rest: the remaining applicants
-      // are still worth placing, and this one is retryable on the next sync.
+      // One failed chunk must not abandon the rest.
       console.warn(`Geocoding chunk ${start}-${start + chunk.length} failed:`, err.message);
       chunk.forEach((a) => { a.geocodeIssue = `Geocoding unavailable: ${err.message}`; });
     }
@@ -273,9 +255,6 @@ function applyGeocodeResult(a, r) {
     return;
   }
 
-  // Either nothing was found, or the geocoder only managed to place the
-  // address at street/city level. Say which, so the organizer can fix
-  // the row instead of wondering why the pin is in the wrong place.
   a.coords         = null;
   a.geocodedReal   = false;
   a.geocodeWarning = null;
@@ -478,26 +457,21 @@ function escHtml(str) {
 
 let map, overlapLayer, pinLayer, highlightLayer;
 
-// Which map marker holds each applicant, so clicking a name in a list can go
-// straight to their dot. Rebuilt on every renderMap.
+// Rebuilt on every renderMap.
 let markerForApplicant = new Map();
-// Set once the view has been framed around the pins, so re-rendering after a
-// match run doesn't yank the map back from wherever the organizer panned it.
+// So a re-render does not yank the map back from wherever it was panned.
 let mapFramed = false;
-// Who is currently ringed on the map. Held across renders so approving a group
-// doesn't silently drop the ring the organizer is using to read the map.
+// Held across renders, or approving a group drops the ring silently.
 let selectedApplicantId = null;
 
 function initMap() {
-  // The opening view is a placeholder only. Applicants are no longer all in
-  // Uusimaa, so the real view comes from fitBounds over the actual pins in
-  // renderMap. A hardcoded Helsinki view left a Tampere dataset off-screen.
+  // Placeholder only; renderMap fits the view to the actual pins. A hardcoded
+  // Helsinki view left a Tampere dataset off-screen.
   map = L.map('map', { attributionControl: false }).setView([64.0, 26.0], 5);
   L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
   overlapLayer   = L.layerGroup().addTo(map);
   pinLayer       = L.layerGroup().addTo(map);
-  // Above the pins, so the ring drawn around a selected person is never
-  // hidden underneath a neighbouring dot.
+  // Above the pins, so a selection ring is never hidden under a dot.
   highlightLayer = L.layerGroup().addTo(map);
 }
 
@@ -519,16 +493,13 @@ function applicantCandidateColor(applicantId) {
   return cand ? candidateColor(cand.candidateId) : null;
 }
 
-// Five decimal places is about a metre: anyone sharing a building, and in
-// practice anyone the address register places at the same entrance.
+// Five decimals is about a metre, so anyone sharing an entrance.
 function pinKey(coords) {
   return coords[0].toFixed(5) + ',' + coords[1].toFixed(5);
 }
 
-// One entry per distinct location, holding everyone at it. Two mothers in the
-// same building produced two markers drawn on exactly the same pixel, so the
-// second was invisible and the map appeared to be missing people: 17 applicants
-// showed as 7 dots. Grouping them makes the hidden ones countable and clickable.
+// Two mothers in one building used to be two markers on the same pixel, so
+// the second was invisible: 17 applicants showed as 7 dots.
 function groupApplicantsByLocation(applicants) {
   const spots = new Map();
   applicants.forEach((a) => {
@@ -561,18 +532,15 @@ function renderMap() {
 
   groupApplicantsByLocation(placed).forEach((spot) => {
     const { coords, people } = spot;
-    // A shared pin takes its colour from whichever of its occupants is in a
-    // group, so a dot never looks unmatched when someone under it is matched.
+    // From whichever occupant is in a group, so a shared dot never looks
+    // unmatched when someone under it is matched.
     const groupColor = people.map((a) => colorForGroup(a.matchGroupId) || applicantCandidateColor(a.id))
                              .find(Boolean) || null;
     const isMatched  = !!groupColor;
     const shared     = people.length > 1;
 
-    // A pin placed at the centre of a district, because the sheet named a
-    // place rather than an address, is a guess covering a whole neighbourhood.
-    // Drawn hollow and dashed so it doesn't read as a rooftop-accurate fix:
-    // the popup and the "worth checking" list both say so, but neither is
-    // visible while scanning the map. Raised in review.
+    // Drawn hollow and dashed, or a guess covering a whole district reads as
+    // a rooftop-accurate fix while scanning the map.
     const approximate = people.every((a) => a.geocodePrecision === 'area');
     const marker = L.circleMarker(coords, {
       radius: shared ? 12 : 9,
@@ -584,9 +552,7 @@ function renderMap() {
     }).addTo(pinLayer);
 
     if (shared) {
-      // Permanent count on the dot: the organizer can see at a glance that
-      // something is underneath, which is what she previously had to drag
-      // dots around in Google Maps to discover.
+      // Otherwise there is nothing to show that anyone is underneath.
       marker.bindTooltip(String(people.length), {
         permanent: true, direction: 'center', className: 'pin-count',
       });
@@ -610,8 +576,6 @@ function renderMap() {
   if (selectedApplicantId) drawHighlightRing(selectedApplicantId);
 }
 
-// Frames the view around everyone who has a location, once. Without this the
-// map sat on its opening view and a dataset outside that view looked empty.
 function frameMapAroundPins(placed) {
   if (mapFramed || placed.length === 0) return;
   const bounds = L.latLngBounds(placed.map((a) => a.coords));
@@ -619,7 +583,6 @@ function frameMapAroundPins(placed) {
   mapFramed = true;
 }
 
-// Drawn unfilled, so the dot underneath stays readable through the ring.
 function drawHighlightRing(applicantId) {
   const marker = markerForApplicant.get(applicantId);
   if (!marker) return null;
@@ -629,14 +592,9 @@ function drawHighlightRing(applicantId) {
   return marker;
 }
 
-// Which map marker belongs to each suggested place, so clicking an entry in
-// the list on the card opens that marker, the same way clicking a person in a
-// list finds her pin.
 let markerForMeeting = new Map();
 
-// Rings a single person on the map and brings them into view. This is the
-// answer to "where is this person" for someone sitting under another dot: the
-// ring is drawn on top, and the popup opens on their own entry.
+// The answer to "where is this person" for someone under another dot.
 function focusApplicantOnMap(applicantId) {
   highlightLayer.clearLayers();
   if (!getApplicant(applicantId)) return false;
@@ -645,48 +603,36 @@ function focusApplicantOnMap(applicantId) {
   if (!marker) return false;
   selectedApplicantId = applicantId;
 
-  // Zoom in enough that neighbouring buildings separate, but never zoom out
-  // from wherever the organizer already is.
+  // Never zoom out from wherever the organizer already is.
   map.setView(marker.getLatLng(), Math.max(map.getZoom(), 15), { animate: true });
   marker.openPopup();
   return true;
 }
 
-// How many venues to measure. Each one costs a real routing query per member,
-// so this is the budget: a dozen options plus the members' own homes is enough
-// to find a good answer without turning one click into a minute of waiting.
+// Each venue costs a routing query per member, so this is the budget.
 const MEETING_SHORTLIST = 9;
-// How many to actually offer. More than a handful is not a choice, it is a
-// list, and the coordinator has to put one of these in a message.
 const MEETING_OPTIONS = 3;
 
-// Real travel times are slow enough that clicking the same group twice should
-// not pay for them again. Keyed by the members, so editing a group discards it.
+// Keyed by the members, so editing a group discards it.
 const meetingCache = new Map();
 
 function meetingCacheKey(members) {
   return members.map((m) => `${m.id}:${m.coords}:${m.maxTravel}`).sort().join('|');
 }
 
-// The mode a member would actually use to get somewhere: the fastest she has.
-// Unlike the old overlap this does not need the group to share a mode, which
-// is what made that version useless on real data. Three of four real groups
-// had exactly one transit-only member, and that one member stopped the whole
-// group from being measured at all.
+// The fastest mode she has. Deliberately not a mode the whole group shares:
+// requiring that made the old overlap useless, since one transit-only member
+// disabled measurement for everyone.
 function travelMode(applicant) {
   return [...applicant.transport]
     .sort((a, b) => MatchingEngine.MODE_MODEL[b].speedKmh - MatchingEngine.MODE_MODEL[a].speedKmh)[0];
 }
 
-// Somewhere the group could actually meet, ranked by the worst journey any
-// member would make. Matching has already put these members near each other,
-// so the search is a fixed radius around their combined centre.
 async function findMeetingPoints(members) {
   const circle = Reachability.venueSearchCircle(members);
   const centre = [circle.lat, circle.lon];
 
-  // Their own homes are always candidates and cost nothing to offer. For a
-  // mother with a small baby someone's living room often beats a park.
+  // Free to offer, and a living room often beats a park.
   let candidates = Reachability.homesAsVenues(members);
 
   try {
@@ -697,9 +643,7 @@ async function findMeetingPoints(members) {
       })
     );
   } catch (err) {
-    // OpenStreetMap's Overpass is a free shared service and sheds load when
-    // busy. Losing it means fewer options, not no answer, so carry on with
-    // the homes rather than failing the whole click.
+    // Overpass sheds load when busy. Fewer options, not no answer.
     console.warn('Venue lookup failed, offering homes only:', err.message);
   }
 
@@ -740,8 +684,7 @@ async function drawOverlap(candidateId) {
   let scored = meetingCache.get(key);
 
   if (!scored) {
-    // Real itineraries from the router Reittiopas runs on, so this takes a few
-    // seconds. Say so, rather than appearing to have ignored the click.
+    // Real itineraries, so this takes a few seconds.
     setOverlapStatus('Finding places to meet and checking real travel times\u2026');
     try {
       scored = await findMeetingPoints(members);
@@ -756,10 +699,8 @@ async function drawOverlap(candidateId) {
   renderMeetingList(candidateId, scored, members);
 }
 
-// The same suggestions, on the candidate card. The map answers "where", but
-// the coordinator has to copy a name and a set of travel times into a message,
-// and reading that off a popup she has to keep re-opening is painful. Each
-// entry collapses so a card with three options is still scannable.
+// The map answers "where", but the name and times get copied into a message,
+// and re-opening a popup for each option to compare them is painful.
 function renderMeetingList(candidateId, scored, members) {
   const host = document.querySelector(`.meeting-list[data-meeting-for="${cssEscape(candidateId)}"]`);
   if (!host) return;
@@ -839,19 +780,13 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
     .sort((a, b) => a.worstMinutes - b.worstMinutes)
     .slice(0, MEETING_OPTIONS);
 
-  // Everyone in the pool is on this map, so the members of the group being
-  // looked at have to be picked out or the suggestion is a set of lines
-  // reaching into an anonymous crowd of dots. Rung in the group's own colour,
-  // and drawn into the overlap layer so they clear when it is toggled off.
+  // Everyone in the pool is on this map, so without this the suggestion is
+  // lines reaching into an anonymous crowd of dots.
   markActiveMembers(members, color);
 
   if (!workable.length) {
-    // Still worth framing the group: the coordinator can at least see who is
-    // in it and how far apart they are, which is the explanation for why
-    // there is no answer.
+    // Still frame it: how far apart they are is the explanation.
     frameGroup(members, []);
-    // An honest empty answer. The old version always drew something, which
-    // made a group nobody can gather look workable.
     const near = Reachability.nearestMiss(scored);
     const spread = Reachability.groupSpreadKm(members);
     setOverlapStatus(
@@ -862,19 +797,15 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
     return;
   }
 
-  // Lines from each member to each option, so it is visible at a glance who
-  // is being asked to travel furthest.
+  // So it is visible who is being asked to travel furthest.
   workable.forEach((option, rank) => {
     const primary = rank === 0;
 
     members.forEach((m) => {
       const path = [m.coords, [option.lat, option.lon]];
-      // Drawn twice: a pale casing underneath, then the coloured line on top.
-      // The group colours are dark and muted by design, which makes them
-      // nearly invisible against OpenStreetMap's own greens and greys, and
-      // simply brightening them would lose the link to the group's pins. A
-      // casing is what map renderers do to keep a route legible over any
-      // basemap, and it keeps the colour meaningful.
+      // A pale casing under the coloured line. The group colours are dark by
+      // design and vanish into the basemap's greens and greys, and
+      // brightening them would lose the link to the group's pins.
       L.polyline(path, {
         color: '#FFFFFF',
         weight: primary ? 7 : 5,
@@ -891,7 +822,7 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
       }).addTo(overlapLayer);
     });
 
-    // A square marker, deliberately unlike the round pins that mean people.
+    // Square, unlike the round pins that mean people.
     const marker = L.marker([option.lat, option.lon], {
       icon: L.divIcon({
         className: 'meeting-marker' + (primary ? ' meeting-marker-best' : ''),
@@ -912,10 +843,8 @@ function renderMeetingPoints(scored, members, color, caveat = '') {
   );
 }
 
-// A ring around each member of the group currently being shown. Dashed, and
-// wider than the pin inside it, so it reads as a selection rather than as
-// another person, and cannot be confused with the solid highlight ring that
-// marks one individual picked from a list.
+// Dashed and wider than the pin inside, so it reads as a selection and is not
+// confused with the solid ring that marks one person picked from a list.
 function markActiveMembers(members, color) {
   members.forEach((m) => {
     L.circleMarker(m.coords, {
@@ -924,10 +853,8 @@ function markActiveMembers(members, color) {
   });
 }
 
-// Zooms to the group and its suggestions. Without this the map stays wherever
-// it was framed over the whole applicant pool, which for a national dataset
-// can be hundreds of kilometres wide, and the meeting markers are a few
-// indistinguishable pixels somewhere in it.
+// Without this the map stays framed over the whole pool, which for a national
+// dataset is hundreds of kilometres wide.
 function frameGroup(members, options) {
   const points = [
     ...members.map((m) => m.coords),
@@ -935,11 +862,8 @@ function frameGroup(members, options) {
   ];
   if (!points.length) return;
 
-  // Deliberately overrides wherever the organizer had panned to: she just
-  // asked to see this group, so moving there is the answer to the click.
+  // Overrides wherever it was panned: she just asked to see this group.
   map.fitBounds(L.latLngBounds(points), { padding: [70, 70], maxZoom: 15 });
-  // The pool-wide framing has been replaced, so a later re-render must not
-  // undo this by fitting to everyone again.
   mapFramed = true;
 }
 

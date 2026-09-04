@@ -51,39 +51,19 @@ const MIME = {
 // ---------------------------------------------------------------------------
 // Static assets: compressed once, then held in memory
 // ---------------------------------------------------------------------------
-// The frontend ships as plain source with no build step, which is deliberate:
-// the organizer runs `node server.js` and there is nothing to compile. The
-// cost is that the browser downloads about 99KB of JavaScript, most of it
-// comments, and none of it compressed.
-//
-// Both are fixable here rather than by adding a bundler. Measured on this
-// project's four browser scripts:
-//
-//   as written                       99,351 bytes
-//   gzip                             32,003
-//   brotli                           27,132
-//   comments stripped, then brotli   16,465
-//
-// So the whole frontend becomes a sixth of its size without touching a line of
-// source or introducing a build. Everything is computed on first request and
-// cached, keyed by the file's modification time so editing a file during
-// development is picked up.
+// The frontend ships as plain source with no build step, so compression
+// happens here instead of in a bundler. Measured on the four browser scripts:
+// 99,351 bytes as written, 32,003 gzipped, 16,465 with comments stripped then
+// brotli. Cached against mtime, so editing a file is still picked up.
 const COMPRESSIBLE = new Set(['.js', '.css', '.html', '.json', '.svg', '.csv']);
 const assetCache = new Map();
 
-// Drops whole-line comments. Deliberately never touches anything mid-line, so
-// a `//` inside a string or a regex is untouched and no tokenizer is needed.
+// Whole lines only, never mid-line, so a `//` in a string or regex is safe
+// without a tokenizer.
 //
-// Blank lines are deliberately kept. Removing them saved 94 bytes after
-// brotli, and a blank line inside one of app.js's multi-line HTML templates
-// is content: dropping it would change the rendered markup while still
-// parsing cleanly, so no parse check would catch it. Not a trade worth making
-// for 94 bytes.
-//
-// A comment line inside a template literal would be the same hazard. There
-// are none today, in any of the four files, and if one ever appears the
-// output-equality check in the tests fails rather than the page quietly
-// rendering something else.
+// Blank lines are kept on purpose: inside app.js's HTML templates a blank line
+// is content, so dropping it would change the markup while still parsing, and
+// no parse check would catch that. It saved 94 bytes after brotli.
 function stripComments(source) {
   return source
     .split('\n')
@@ -97,8 +77,6 @@ function stripComments(source) {
 function leanJs(filePath, source) {
   const lean = stripComments(source);
   try {
-    // Parse only. Catches the case where a stripped line was load-bearing,
-    // such as one inside a template literal.
     new (require('vm').Script)(lean, { filename: filePath });
     return lean;
   } catch (err) {
@@ -171,8 +149,6 @@ const server = http.createServer((req, res) => {
     const asset = buildAsset(filePath, ext);
     const accepted = String(req.headers['accept-encoding'] || '');
 
-    // Brotli first, then gzip, then the file as-is. Both are computed once and
-    // held in memory, so repeated loads cost nothing.
     let body = asset.raw;
     let encoding = null;
     if (asset.br && /\bbr\b/.test(accepted))          { body = asset.br;   encoding = 'br'; }
@@ -191,8 +167,7 @@ const server = http.createServer((req, res) => {
   }
 });
 
-// Only when run as a program, so the tests can import stripComments without
-// binding a port.
+// So the tests can import stripComments without binding a port.
 if (require.main === module) {
   server.listen(PORT, '127.0.0.1', () => {
     console.log('');
@@ -204,6 +179,4 @@ if (require.main === module) {
   });
 }
 
-// Exported so the tests can check that stripping comments does not change
-// what the app renders, which a parse check alone cannot tell.
-module.exports = { stripComments, buildAsset };
+module.exports = { stripComments };
