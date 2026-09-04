@@ -1,6 +1,6 @@
 # Village Matcher
 
-A support-group matching tool for new mothers in the Helsinki region. Reads
+A support-group matching tool for new mothers, covering all of Finland. Reads
 applicants
 from a Google Sheet, runs a neighbourhood-aware grouping algorithm, and lets
 a coordinator review and approve candidate groups. Approved members are
@@ -13,13 +13,15 @@ by the `Village` column the coordinator maintains there.
 Browser (Netlify static)
   ↓  POST /.netlify/functions/api  +  X-Matcher-Password header
 Netlify Function
-  ├── Google Sheets API  (service account — GOOGLE_SERVICE_ACCOUNT_JSON env var)
-  ├── Digitransit API    (geocoding + transit routing — DIGITRANSIT_API_KEY)
-  └── OpenRouteService   (isochrones — ORS_API_KEY)
+  ├── Google Sheets API  (service account, GOOGLE_SERVICE_ACCOUNT_JSON env var)
+  ├── Digitransit API    (geocoding + routing, DIGITRANSIT_API_KEY)
+  └── Overpass API       (OpenStreetMap places to meet, no key needed)
 ```
 
-The organizer opens the Netlify URL, enters a password, and uses the tool.
-No local server, no terminal, no Google sign-in.
+The organizer runs this locally with `node server.js` and opens
+`http://localhost:3000`. `server.js` imports the same handler as the Netlify
+function, so both paths share all backend logic, but local is the path
+actually in use. Nothing is designed around a hosting invocation limit.
 
 ## Running locally (macOS / Linux)
 
@@ -37,13 +39,15 @@ MATCHER_PASSWORD=...
 SPREADSHEET_ID=...
 SOURCE_TAB=Form Responses 1
 DIGITRANSIT_API_KEY=...
-ORS_API_KEY=...
 GOOGLE_SERVICE_ACCOUNT_KEY_FILE=village-matcher-key.json   # path to key file
 ```
 
 See `docs/LOCAL-SETUP.md` for step-by-step organizer instructions.
 
-## Deploying to Netlify
+## Deploying to Netlify (optional)
+
+Not the path in use. The organizer runs the tool locally; this is kept only so
+the hosted option still works if it is ever wanted.
 
 All credentials are set as environment variables in the Netlify dashboard
 (never in the repo). Required variables:
@@ -55,7 +59,6 @@ All credentials are set as environment variables in the Netlify dashboard
 | `SPREADSHEET_ID` | Google Sheet ID (the long string in the sheet URL) |
 | `SOURCE_TAB` | Sheet tab name containing applicant data |
 | `DIGITRANSIT_API_KEY` | From portal.digitransit.fi |
-| `ORS_API_KEY` | From openrouteservice.org |
 
 See `docs/ORGANIZER-SETUP.md` for step-by-step Netlify deployment instructions.
 
@@ -67,14 +70,16 @@ styles.css
 src/
   app.js                     all UI logic and backend calls
   matching-engine.js         grouping algorithm
+  reachability.js            picking where a group should meet (browser + backend)
+  regions.js                 Finnish place reference and geocode verification (Node only)
   validation.js              row validation (browser + function share same file)
 netlify/
   functions/
-    api.js                   Netlify Function — all backend logic
-netlify.toml                 Netlify build config
-server.js                    local production server (serves frontend + API)
+    api.js                   all backend logic (imported by server.js too)
+netlify.toml                 Netlify build config (optional hosted path)
+server.js                    local server the organizer actually runs
 local-test-server.js         local dev server (CSV mock data only)
-mock-applicants.csv          150 sample rows for offline testing
+mock-applicants.csv          300 sample rows for offline testing
 package.json
 tests/
 docs/
@@ -102,7 +107,6 @@ GOOGLE_SERVICE_ACCOUNT_JSON=<paste JSON here>
 SPREADSHEET_ID=<your sheet id>
 SOURCE_TAB=mock-applicants
 DIGITRANSIT_API_KEY=<key>
-ORS_API_KEY=<key>
 ```
 ```
 netlify dev
@@ -123,11 +127,27 @@ Then open `index.html?backend=http://localhost:8791` or run `npm run test:ui`.
 
 ## Test data
 
-`mock-applicants.csv` holds 150 synthetic applicants spread across 50 real
-districts and municipalities in Uusimaa — Helsinki, Espoo, Vantaa and
-Kauniainen through to Porvoo, Lohja, Hyvinkää, Raasepori and Hanko — using
-real street names with invented house numbers. It is shaped to exercise the
-matching engine rather than to look tidy:
+`mock-applicants.csv` holds 300 synthetic applicants using real street names
+with invented house numbers. Rows A001-A150 cover Uusimaa: Helsinki, Espoo,
+Vantaa and Kauniainen through to Porvoo, Lohja, Hyvinkää, Raasepori and Hanko.
+Rows A151-A300 cover the rest of the country: Tampere and its districts,
+the Pirkanmaa commuter belt (Kangasala, Nokia, Pirkkala, Ylöjärvi, Lempäälä,
+Valkeakoski), and Turku, Oulu, Jyväskylä, Lahti, Hämeenlinna and Kouvola.
+
+That second half exists because the tool stopped being a Helsinki-region tool,
+and the failures that came with the move only appear in national data:
+
+- **The same street name in several cities.** Hämeenkatu is in Tampere, Turku
+  and Hyvinkää; Yliopistonkatu in Tampere, Turku and Jyväskylä; Kauppakatu in
+  Kouvola, Jyväskylä and Oulu. Each appears more than once in the sample, in
+  different cities, so a geocoder that ignores the municipality gets caught.
+- **Several people at one address.** Seven rows deliberately repeat an
+  address, because coincident pins used to be drawn on top of each other and
+  the hidden ones were invisible.
+- **Districts written instead of cities** (`Hervanta`, `Kaleva`), which is how
+  the column actually gets filled in.
+
+It is shaped to exercise the matching engine rather than to look tidy:
 
 - **Languages** follow the largest foreign-language populations in Finland
   (Russian, Estonian, Arabic, Somali, Ukrainian, Vietnamese, Chinese, Kurdish,
@@ -138,13 +158,19 @@ matching engine rather than to look tidy:
   exercise normalization.
 - **Travel limits** include free-text answers such as "Doesn't matter" and
   "about 20 min".
-- **Six rows are deliberately corrupted** (A145–A150) — unknown transport
-  modes, an impossible date, a missing name, an out-of-range travel time — so
-  the validation layer always has something to flag. The remaining 144 are
-  eligible for matching.
+- **Rows are deliberately corrupted** (A145-A150 and A296-A300): unknown
+  transport modes, an impossible date, a missing name, an out-of-range travel
+  time, a street that does not exist, a missing neighbourhood, so the
+  validation and geocoding failure paths always have something to flag.
 
 `src/regions.js` carries a coordinate for every neighbourhood the CSV uses, so
 the offline geocode stub places people in roughly the right part of the map.
+The stub also puts every fourth address on a neighbour's exact coordinates, so
+the map's shared-pin handling is exercised without a network call.
+
+Measured against the live Digitransit API over all 300 rows: 286 placed, none
+in the wrong municipality, and the 14 refusals are all streets that genuinely
+do not exist in the municipality given (or rows with no address at all).
 
 ## Messy addresses
 
@@ -162,13 +188,172 @@ is not (`5 A 12`). A missing space is inserted, so `Vaasankatu5` resolves.
 The Neighbourhood cell is matched case-insensitively, with or without
 Scandinavian diacritics (`toolo` finds Töölö), ignoring postal codes and
 parentheses, and accepting a district and city written together — `Helsinki,
-Kallio` anchors on Kallio, since a district anchors more tightly than a city.
-A city on its own (`Helsinki`, `Espoo`, `Vantaa`) resolves too, with a wider
-radius. Anything unrecognised is flagged rather than guessed at.
+Kallio`, `Kallio (Helsinki)` and `Pirkkala Kyösti` all resolve, whether the
+two names are separated by punctuation or just a space. A city on its own
+resolves too. Anything unrecognised is flagged rather than guessed at.
 
-Measured against the live API on 19 deliberately messy inputs: 7 resolved
-before, 18 after, with the nineteenth correctly flagged as a street that
-doesn't exist.
+## How an address becomes a coordinate
+
+Digitransit's geocoder covers all of Finland but treats the query as free
+text: it discards the municipality and fuzzy-matches the street name
+nationally, so `Jokikatu 11, Porvoo` comes back as Jokikatu 11 in Joensuu,
+400km away, at 0.96 confidence. **The confidence score cannot be used to catch
+this.** What works is verifying the answer ourselves:
+
+1. **Establish the municipality.** A district resolves to its city through the
+   table in `src/regions.js` (`Hervanta` → Tampere); anything else is looked up
+   in the geocoder's own `localadmin` layer, so all 309 municipalities work
+   without a hand-kept list. Results are cached.
+2. **Ask several ways.** Pelias is inconsistent about qualifiers: a district
+   name can pin the right city (`Insinöörinkatu 60, Hervanta` is exact) or
+   return *nothing at all* (`Vaasankatu 5, Kallio` finds zero results, while
+   `Vaasankatu 5, Helsinki` is exact). The query ladder tries the most specific
+   phrasing first and falls back to the bare street.
+3. **Verify at municipality level.** Street names repeat across Finland but are
+   effectively unique within a municipality, so the municipality is the check
+   that works. `localadmin` is the municipality; `locality` is the *postal
+   town* and is not accepted in its place. Parts of Kangasala have a Tampere
+   postal town, and trusting that put Kangasala addresses on the map as
+   Tampere.
+4. **Rank what survives** by exact house number first, then district match,
+   then confidence. Pelias ranks by text similarity, so it offered house 9 for
+   a request for 59: the right street, 700m away.
+
+Nothing verifiable means no answer: the row is flagged for the organizer
+rather than pinned somewhere plausible. A wrong pin is worse than a flag,
+because a flag can be fixed and a wrong pin quietly corrupts a group.
+
+The geocoder is **never** constrained to a sub-region. An earlier version
+passed a Uusimaa-shaped `boundary.rect`, which clipped Pirkanmaa out of the
+result set entirely, so the only candidates left for a Tampere street were
+same-named streets in Uusimaa, so Tampere applicants landed in Helsinki,
+Hyvinkää, Espoo, Salo and Järvenpää. Constrain the answer, not the search.
+
+### The result cache
+
+Geocode results are cached in the browser's `localStorage` and never expire,
+which is right: an address does not move. But it also means a coordinate the
+backend got *wrong* is kept forever, so a geocoder fix does not reach anyone
+who already loaded the old result.
+
+`GEOCODE_CACHE_VERSION` in `src/app.js` is the escape hatch. Bump it whenever a
+change could alter the coordinate an address resolves to; entries under older
+prefixes are discarded on the next load. It went to `v2` with the move off the
+Uusimaa-only geocoder, because the browser that reported the wrong-city bug was
+holding exactly the wrong pins the fix corrects.
+
+### What the organizer sees
+
+Results are not just found or not found. Under **Needs attention**, blocking
+problems (red) are people who are *not* on the map and not being matched;
+below them, amber rows are people who *are* on the map but whose pin deserves
+a glance:
+
+| Reported as | Meaning |
+|---|---|
+| exact | the house number asked for |
+| approximate | right street and city, nearest house number in the register |
+| street level | the street exists, that house number does not |
+| area level | the street cell held only a place name, so the pin is at the centre of that district |
+
+### Batching
+
+Requests are spaced globally and retried on throttling. A 300-applicant sync
+issues roughly 600 geocoder calls; without spacing, around twenty came back
+rate-limited, which looked to the organizer like people missing from the map
+for no reason. Repeated addresses within one batch are looked up once.
+
+That spacing means a sync takes time proportional to its size: 300 applicants
+measured at about 65 seconds. The frontend sends addresses in chunks of
+`GEOCODE_CHUNK_SIZE` (10) and waits for each before starting the next.
+
+This is not a timeout workaround. The organizer runs the backend locally with
+`node server.js`, which has no invocation limit. Chunking buys two things a
+single large call cannot: pins appear as they resolve rather than after a
+silent minute, and a failure costs ten people instead of all of them. The sync
+button reports progress while it works.
+
+Chunks are sequential on purpose. The rate limiter is per process, so running
+chunks at the same time would multiply the request rate and bring the
+throttling straight back.
+
+## The map
+
+Pins are drawn per *location*, not per person. Two mothers in the same building
+used to be two markers on the same pixel, so the second was invisible: a
+17-person dataset showed as 7 dots with nothing to indicate the rest were
+underneath. A shared pin is now drawn slightly larger, carries a count, and its
+popup lists everyone standing on it.
+
+The view frames itself around the pins that exist, rather than opening on a
+fixed city. A hardcoded Helsinki view left a Tampere dataset off-screen
+entirely. Pressing **Sync with Google Sheet** re-frames it; panning and zooming
+by hand is not undone by a re-render.
+
+Clicking a person anywhere on their row in any list rings them on the map,
+zooms in far enough that neighbouring buildings separate, and opens their
+popup. The row itself is marked so it is clear which dot belongs to which name.
+Rows that could not be placed have no such control, so clicking them is inert
+rather than a dead end.
+
+## Where should a group meet?
+
+The coordinator's real question about a candidate group is not what shape its
+travel overlap is; it is where to tell four mothers to meet. So the tool
+answers that directly.
+
+**There is no accurate isochrone available.** OpenRouteService has profiles for
+car, foot and bicycle but none for public transport, and public transport is
+how most applicants travel: 13 of the 17 people in the first real dataset.
+Digitransit has no isochrone endpoint either. Its published API list has seven
+APIs and none of them return reachable areas, and the OpenTripPlanner isochrone
+resource that older versions exposed is gone from the v2 routers.
+
+What Digitransit does have is the itinerary planner that HSL's own Reittiopas
+runs on, and a GraphQL endpoint that answers many aliased queries in one
+request. Measured: 8 real transit journeys in one request in 1.7s. So rather
+than approximate a reachable area, the tool measures real journeys to real
+places:
+
+1. **Match first.** A candidate group is already built from members who are
+   close in travel time, which is what makes a fixed search radius reasonable.
+2. **Find real places** within 10km of the group's combined centre, from
+   OpenStreetMap via Overpass: playgrounds, parks, community centres and
+   shopping malls. Malls are in that list because of the winter, when an
+   outdoor meeting is not an option for months. Every member's own home is a
+   candidate too, since for a mother with a small baby someone's living room
+   often beats a park.
+3. **Shortlist about nine**, spread out and mixed across those kinds. Around
+   Tampere, Overpass returns 872 playgrounds and 681 parks, so a pure distance
+   sort offered ten playgrounds in one neighbourhood and nothing else.
+4. **Measure real journeys** from every member to every shortlisted place,
+   each using her own fastest mode, with real timetables and real waiting time.
+5. **Offer the best three**, ranked by the longest journey anyone would make,
+   because a group is only as reachable as its most burdened member.
+
+On the map each suggestion is a square marker, deliberately unlike the round
+pins that mean people, with lines drawn to it from every member's home so it is
+obvious at a glance who is being asked to travel furthest. The popup lists each
+member's real journey against her own stated limit. A whole click takes about
+seven seconds and is cached per group.
+
+If nothing works for everyone, it says so and reports how far apart the members
+live, rather than drawing something anyway.
+
+### What this replaced
+
+The previous version drew a circle per member, radius = fastest speed x stated
+travel limit. It was wrong three ways at once: it used each member's fastest
+mode rather than one they shared, it measured straight lines across a city
+built between two large lakes, and it used the full travel limit while the
+matching engine halves journeys on the assumption a group meets in the middle.
+It looked like an isochrone and was not one.
+
+It also had a real isochrone path, for groups where every member shared driving
+or walking, and that path never ran on real data: three of four real candidate
+groups contained exactly one transit-only member, and one such member disabled
+the whole group. Measuring each member with her own mode removes that problem
+entirely.
 
 ## Sheet columns
 
@@ -183,6 +368,27 @@ creating those two columns on first run if they are missing.
 `Village` is coordinator-maintained: anyone with a value there is treated as
 already placed, so they drop out of the unmatched pool and appear under that
 village in Active Groups.
+
+### Expecting mothers
+
+`Date of birth` holds a **due date as often as a birthday**. Matching before
+the birth is deliberate: a village takes time to warm up, and it is needed most
+in the first weeks, when there is least energy to go looking for one. Dates up
+to ten months ahead are accepted (a full pregnancy from the earliest a due
+date is known), while still rejecting a mistyped year.
+
+The matching engine needs no special case for this. Age is compared as months
+between members, and two due dates a month apart are a month apart exactly as
+two birthdays are, so `maxAgeGap` groups expecting mothers with each other and
+with newborns at the right distance. What does change is the coordinator's
+side: anyone still expecting is marked `expecting` on their row, their date is
+labelled **Due** rather than **Baby DOB**, and the map popup says so, because
+it changes how you write to her and which group she belongs in.
+
+Accepted dates are bounded by `DOB_MAX_MONTHS_AHEAD` and
+`DOB_MAX_YEARS_PAST` in `src/validation.js`. The backward bound is generous on
+purpose: a rolling application means a "youngest child" can be a couple of
+years old by the time a group forms.
 
 ## Match quality scoring
 

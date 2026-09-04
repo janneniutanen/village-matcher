@@ -1,19 +1,23 @@
 'use strict';
 
-// Netlify Function — Village Matcher backend
+// Village Matcher backend.
+//
+// The organizer runs the tool locally with `node server.js`, which imports
+// this handler directly. The Netlify Function wrapper is kept for the hosted
+// path, but the local server is what is actually used, so nothing here is
+// designed around a Lambda invocation limit.
 //
 // Handles all backend actions: Google Sheets read/write (via service account),
-// geocoding (Digitransit), travel time (OSRM + Digitransit routing), and
-// isochrones (OpenRouteService). All credentials come from Netlify environment
-// variables — never from the browser.
+// geocoding and travel times (Digitransit), and meeting-place lookup
+// (OpenStreetMap via Overpass). All credentials come from environment
+// variables, never from the browser.
 //
 // Environment variables required:
 //   MATCHER_PASSWORD           — password the organizer enters in the UI
 //   GOOGLE_SERVICE_ACCOUNT_JSON — full contents of the service account JSON key file
 //   SPREADSHEET_ID             — Google Sheet ID (the long string in the sheet URL)
 //   SOURCE_TAB                 — sheet tab name containing applicant data
-//   DIGITRANSIT_API_KEY        — from portal.digitransit.fi
-//   ORS_API_KEY                — from openrouteservice.org
+//   DIGITRANSIT_API_KEY        - from portal.digitransit.fi
 
 const { google } = require('googleapis');
 const fs         = require('fs');
@@ -34,7 +38,15 @@ let _helperTabsOk  = false;
 const GROUPS_TAB    = 'Groups';
 const TEMPLATES_TAB = 'Message Templates';
 const SETTINGS_TAB  = 'Settings';
-const HELPER_TABS   = new Set([GROUPS_TAB, TEMPLATES_TAB, SETTINGS_TAB]);
+const MEETING_TAB   = 'Meeting Places';
+const HELPER_TABS   = new Set([GROUPS_TAB, TEMPLATES_TAB, SETTINGS_TAB, MEETING_TAB]);
+
+// Suggestions for a group that was never approved go stale: they are built
+// from timetables, and a candidate left sitting for a month should be looked
+// up again rather than shown times from a service pattern that has changed.
+// A row claimed by an approved group is kept regardless, as the record of what
+// was suggested.
+const MEETING_CACHE_MAX_AGE_DAYS = 30;
 
 const COL = {
   id: 'Identity number', name: 'Name', neighborhood: 'Neighbourhood',
@@ -144,7 +156,7 @@ async function ensureReady() {
   }
 
   // Create missing helper tabs in one batch
-  const toAdd = [GROUPS_TAB, TEMPLATES_TAB, SETTINGS_TAB].filter(t => !titleSet.has(t));
+  const toAdd = [GROUPS_TAB, TEMPLATES_TAB, SETTINGS_TAB, MEETING_TAB].filter(t => !titleSet.has(t));
   if (toAdd.length) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: sid,
@@ -159,6 +171,15 @@ async function ensureReady() {
       spreadsheetId: sid, range: `'${GROUPS_TAB}'!A1`,
       valueInputOption: 'USER_ENTERED',
       resource: { values: [['Group ID', 'Name', 'Member IDs', 'Status', 'Created', 'Updated']] },
+    });
+  }
+
+  const meetingRows = await readRows(MEETING_TAB);
+  if (!meetingRows.length || meetingRows[0][0] !== 'Key') {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: sid, range: `'${MEETING_TAB}'!A1`,
+      valueInputOption: 'USER_ENTERED',
+      resource: { values: [['Key', 'Group ID', 'Members', 'Places', 'Cached']] },
     });
   }
 
@@ -374,89 +395,302 @@ async function sheetSaveSettings(settings) {
 // ---------------------------------------------------------------------------
 // Geocoding — Digitransit Pelias API
 // ---------------------------------------------------------------------------
-// Digitransit's geocoder discards the municipality in a free-text query and
-// fuzzy-matches the street name across all of Finland — "Jokikatu 11, Porvoo"
-// comes back as Jokikatu 11 in Joensuu, 400km away, at 0.96 confidence. So the
-// confidence score is useless for catching this; what makes a result
-// trustworthy is anchoring the search to the district and then checking the hit
-// really landed there. Measured on 12 sample addresses: 9/9 correct anchored
-// per district, 7/12 with a single region-wide anchor.
-async function geocodeBatch(entries) {
+// The geocoder treats the query as free text: it discards the municipality and
+// fuzzy-matches the street nationally, so "Jokikatu 11, Porvoo" comes back as
+// Jokikatu 11 in Joensuu at 0.96 confidence. Confidence cannot catch this.
+//
+// So search nationally and verify the answer here, at municipality level.
+// Never constrain the search to a sub-region: a Uusimaa `boundary.rect` used
+// to clip Pirkanmaa out of the results, leaving only same-named Uusimaa
+// streets for every Tampere address. Regions.scoreCandidate holds the
+// verification and is unit-tested without network.
+const GEOCODE_URL = 'https://api.digitransit.fi/geocoding/v1/search';
+
+const GEOCODE_CONCURRENCY = 6;
+
+// Digitransit rate-limits per key. Unspaced, a 300-applicant sync had 20-odd
+// people fail as "geocoder unavailable" purely because the batch was large.
+// Spaced globally, not per worker, so the ceiling holds at any concurrency.
+const MIN_REQUEST_SPACING_MS = 110;
+
+let _nextRequestSlot = 0;
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+async function awaitRequestSlot() {
+  const now  = Date.now();
+  const slot = Math.max(now, _nextRequestSlot);
+  _nextRequestSlot = slot + MIN_REQUEST_SPACING_MS;
+  if (slot > now) await sleep(slot - now);
+}
+
+function digitransitKey() {
   const key = process.env.DIGITRANSIT_API_KEY;
   if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
+  return key;
+}
 
-  return Promise.all(entries.map(async (entry) => {
-    const rawStreet    = typeof entry === 'string' ? entry : (entry.street || '');
-    const neighborhood = typeof entry === 'string' ? ''    : (entry.neighborhood || '');
+// Retried rather than surfaced as "address not found": a transient failure and
+// a bad address need different reactions from the organizer.
+async function geocoderSearch(params, attempt = 0) {
+  await awaitRequestSlot();
+  const resp = await fetch(`${GEOCODE_URL}?${new URLSearchParams(params)}`, {
+    headers: { 'digitransit-subscription-key': digitransitKey() },
+  });
+  if ((resp.status === 429 || resp.status >= 500) && attempt < 5) {
+    // Jittered, or workers throttled together retry in lockstep.
+    await sleep(500 * 2 ** attempt + Math.random() * 250);
+    return geocoderSearch(params, attempt + 1);
+  }
+  if (!resp.ok) throw new Error(`geocoder returned HTTP ${resp.status}`);
+  return resp.json();
+}
 
-    // The sheet is hand-filled, so the cell may carry an apartment number, a
-    // stair, a postal code or a care-of line. None of that helps the geocoder
-    // and some of it makes it miss entirely, so the query uses a cleaned
-    // street while the response reports the original.
-    const street  = Regions.normalizeStreet(rawStreet) || rawStreet;
-    const anchor  = Regions.resolveDistrict(neighborhood);
-    const centre  = anchor ? anchor.coords : null;
-    const base    = { street: rawStreet, neighborhood, queried: street };
+// The administrative fields, not the coordinates, are what say whether a hit
+// is in the right place.
+function toCandidate(feature) {
+  const [lon, lat] = feature.geometry.coordinates;
+  const p = feature.properties || {};
+  return {
+    lat, lon,
+    label:         p.label || null,
+    localadmin:    p.localadmin || null,
+    locality:      p.locality || null,
+    neighbourhood: p.neighbourhood || null,
+    borough:       p.borough || null,
+    confidence:    p.confidence,
+    layer:         p.layer || null,
+  };
+}
 
-    const params = new URLSearchParams({
-      text:               [street, anchor ? anchor.name : neighborhood, 'Finland'].filter(Boolean).join(', '),
-      size:               '5',
-      layers:             'address',
-      'boundary.country': 'FIN',
+// Resolved from the geocoder's own localadmin layer, so all 309 municipalities
+// work without a hand-kept table. Names do not change, so cached for the life
+// of the process.
+const _municipalityCache = new Map();
+
+async function resolveMunicipalityName(name) {
+  const trimmed = String(name || '').trim();
+  if (!trimmed) return null;
+  const key = trimmed.toLowerCase();
+  if (_municipalityCache.has(key)) return _municipalityCache.get(key);
+
+  let resolved = null;
+  try {
+    const data = await geocoderSearch({
+      text: trimmed, size: '5', layers: 'localadmin', 'boundary.country': 'FIN',
     });
-    if (centre) {
-      params.set('focus.point.lat', String(centre[0]));
-      params.set('focus.point.lon', String(centre[1]));
-      params.set('boundary.circle.lat', String(centre[0]));
-      params.set('boundary.circle.lon', String(centre[1]));
-      params.set('boundary.circle.radius', String(anchor.radiusKm));
-    } else {
-      const b = Regions.REGION_BOUNDS;
-      params.set('focus.point.lat', String(Regions.REGION_CENTRE[0]));
-      params.set('focus.point.lon', String(Regions.REGION_CENTRE[1]));
-      params.set('boundary.rect.min_lat', String(b.minLat));
-      params.set('boundary.rect.max_lat', String(b.maxLat));
-      params.set('boundary.rect.min_lon', String(b.minLon));
-      params.set('boundary.rect.max_lon', String(b.maxLon));
+    // Exact equality only. A fuzzy hit is the failure being defended against:
+    // "Hervanta" ranks "Herva, Ii" first, 600km north.
+    const hit = (data.features || []).find((f) =>
+      Regions.placeNameMatches(trimmed, f.properties.localadmin) ||
+      Regions.placeNameMatches(trimmed, f.properties.name));
+    if (hit) {
+      const [lon, lat] = hit.geometry.coordinates;
+      resolved = { name: hit.properties.localadmin || hit.properties.name, coords: [lat, lon] };
     }
+  } catch (err) {
+    // Deliberately not cached. "Not a municipality" and "the network blipped"
+    // are indistinguishable here, and this cache outlives the request, so
+    // caching the second would degrade every later batch too.
+    return null;
+  }
+  _municipalityCache.set(key, resolved);
+  return resolved;
+}
 
+// The curated table maps a district to its city ("Hervanta" -> Tampere);
+// anything it does not know is put to the geocoder.
+async function resolveArea(areaRaw) {
+  const known = Regions.resolveDistrict(areaRaw);
+  if (known) return { municipality: known.municipality, centre: known.coords };
+
+  for (const part of Regions.areaLookupCandidates(areaRaw)) {
+    const hit = await resolveMunicipalityName(part);
+    if (hit) return { municipality: hit.name, centre: hit.coords };
+  }
+  return { municipality: null, centre: null };
+}
+
+// Pelias is inconsistent about qualifiers: a district name can pin the right
+// city ("Insinöörinkatu 60, Hervanta" is exact) or return nothing at all
+// ("Vaasankatu 5, Kallio"). Appending the municipality rescues the second.
+function buildQueries(street, area, municipality) {
+  const queries = [];
+  const push = (text) => { if (text && !queries.includes(text)) queries.push(text); };
+  const areaIsCity = area && municipality && Regions.placeNameMatches(area, municipality);
+
+  if (municipality && area && !areaIsCity) push(`${street}, ${area}, ${municipality}`);
+  if (municipality) push(`${street}, ${municipality}`);
+  if (area) push(`${street}, ${area}`);
+  push(street);
+  return queries;
+}
+
+async function geocodeOne(entry) {
+  const rawStreet    = typeof entry === 'string' ? entry : (entry.street || '');
+  const neighborhood = typeof entry === 'string' ? ''    : (entry.neighborhood || '');
+
+  // The sheet is hand-filled, so the cell may carry an apartment number, a
+  // stair, a postal code or a care-of line. None of that helps the geocoder
+  // and some of it makes it miss entirely, so the query uses a cleaned
+  // street while the response reports the original.
+  const street = Regions.normalizeStreet(rawStreet) || rawStreet;
+  const base   = { street: rawStreet, neighborhood, queried: street };
+
+  if (!street.trim()) return { ...base, precise: false, error: 'no street address given' };
+
+  // A Street address column holding "Kaleva" or "Tampere": a place, not an
+  // address. Placed at the centre of that place and labelled, because refusing
+  // outright dropped people off the map entirely.
+  const placeOnlyStreet = Regions.looksLikePlaceNameOnly(street) ? Regions.resolveDistrict(street) : null;
+  if (placeOnlyStreet) {
+    // A district beats the city it sits in, whichever cell it was typed in.
+    const areaAnchor = Regions.resolveDistrict(neighborhood);
+    const anchor = placeOnlyStreet.kind === 'district' ? placeOnlyStreet
+      : (areaAnchor && areaAnchor.kind === 'district' ? areaAnchor : placeOnlyStreet);
+    return {
+      ...base,
+      municipality: anchor.municipality,
+      lat: anchor.coords[0],
+      lon: anchor.coords[1],
+      label: anchor.name,
+      town: anchor.municipality,
+      precise: true,
+      precision: 'area',
+      houseDelta: null,
+      warning: `no street address in the sheet, so this is placed at the centre of ${anchor.name} and travel times are rough`,
+    };
+  }
+
+  const { municipality, centre } = await resolveArea(neighborhood);
+  const request = { street, area: neighborhood, municipality };
+  const withBase = { ...base, municipality };
+
+  // Nothing to verify a hit against. Guessing here is what put people in the
+  // wrong city, so the row is flagged for the organizer instead.
+  if (!municipality && !neighborhood.trim()) {
+    return { ...withBase, precise: false, error: 'no neighbourhood or city given, so the address cannot be placed with confidence' };
+  }
+
+  const common = { size: '15', 'boundary.country': 'FIN' };
+  // focus.point re-ranks, it never excludes, so it is safe in a way
+  // boundary.rect was not.
+  if (centre) {
+    common['focus.point.lat'] = String(centre[0]);
+    common['focus.point.lon'] = String(centre[1]);
+  }
+
+  const seen = [];
+  let best = null;
+  let lastError = null;
+
+  for (const text of buildQueries(street, neighborhood, municipality)) {
+    let data;
     try {
-      const resp = await fetch(`https://api.digitransit.fi/geocoding/v1/search?${params}`, {
-        headers: { 'digitransit-subscription-key': key },
-      });
-      if (!resp.ok) {
-        return { ...base, precise: false, error: `geocoder returned HTTP ${resp.status}` };
-      }
-      const data = await resp.json();
-      const feat = (data.features || [])[0];
-      if (!feat) return { ...base, precise: false, error: 'no matching street address found' };
-
-      const [lon, lat] = feat.geometry.coordinates;
-      const label = feat.properties.label || null;
-      const town  = feat.properties.localadmin || feat.properties.locality || null;
-
-      // With a known district, check the hit is actually near it. Without one,
-      // the best available check is that the returned municipality matches
-      // what the organizer typed.
-      const inArea = anchor
-        ? Regions.withinAnchor(anchor, [lat, lon])
-        : !!(town && neighborhood && town.trim().toLowerCase() === neighborhood.trim().toLowerCase());
-      const sameStreet = Regions.streetNameMatches(street, label);
-      const precise    = inArea && sameStreet;
-
-      return {
-        ...base, lat, lon, label, town,
-        confidence: feat.properties.confidence,
-        precise,
-        error: precise ? undefined
-          : !inArea
-            ? `matched "${label || 'unknown'}"${town ? ` in ${town}` : ''}, which does not look like ${neighborhood || 'the given area'}`
-            : `no such street here — closest match was "${label || 'unknown'}"${street !== rawStreet ? ` (searched for "${street}")` : ''}`,
-      };
+      data = await geocoderSearch({ ...common, text, layers: 'address' });
     } catch (err) {
-      return { ...base, precise: false, error: err.message };
+      lastError = err.message;
+      continue;
     }
-  }));
+    for (const feature of data.features || []) seen.push(toCandidate(feature));
+    best = Regions.pickBestCandidate(request, seen);
+    if (best) break;
+  }
+
+  // Last resort: the street without a house number, if it is in the verified
+  // municipality. Reported, so the organizer can decide.
+  let precision = 'exact';
+  if (!best) {
+    // Only the most specific phrasing. Re-running the whole ladder tripled the
+    // request count for the rows least likely to resolve.
+    const [mostSpecific] = buildQueries(street, neighborhood, municipality);
+    try {
+      const data = await geocoderSearch({ ...common, text: mostSpecific, layers: 'street' });
+      for (const feature of data.features || []) seen.push(toCandidate(feature));
+      best = Regions.pickBestCandidate(request, seen);
+      if (best) precision = 'street';
+    } catch (err) {
+      lastError = err.message;
+    }
+  }
+
+  if (!best) {
+    if (lastError) return { ...withBase, precise: false, error: `geocoder unavailable: ${lastError}` };
+    // "No such street here" and "right street, wrong city" need different
+    // fixes in the sheet.
+    const nearby = seen.find((c) => c.label);
+    return {
+      ...withBase,
+      precise: false,
+      error: nearby
+        ? `no match for "${street}" in ${municipality || neighborhood}; closest was "${nearby.label}"`
+        : `no address matching "${street}" found in ${municipality || neighborhood}`,
+    };
+  }
+
+  if (precision === 'exact' && best.houseDelta !== null && best.houseDelta > 0) precision = 'approximate';
+
+  // Tens of doors away is a different part of a long street, even though the
+  // pin is close enough to match on.
+  const warning = precision === 'street'
+    ? `placed at street level, because "${street}" has no exact house number in the address register`
+    : best.houseDelta !== null && best.houseDelta > 20
+      ? `house number ${Regions.houseNumber(street)} not in the register; using nearest known "${best.label}"`
+      : undefined;
+
+  return {
+    ...withBase,
+    lat: best.lat,
+    lon: best.lon,
+    label: best.label,
+    town: best.localadmin || best.locality || null,
+    district: best.neighbourhood || best.borough || null,
+    confidence: best.confidence,
+    precise: true,
+    precision,
+    houseDelta: best.houseDelta,
+    matchedOn: best.reasons,
+    warning,
+  };
+}
+
+// Bounded rather than Promise.all over the whole batch, which got throttled at
+// 300 applicants and looked like missing people.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let cursor = 0;
+  const worker = async () => {
+    while (cursor < items.length) {
+      const index = cursor++;
+      results[index] = await fn(items[index], index);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+  return results;
+}
+
+async function geocodeBatch(entries) {
+  digitransitKey();
+  const list = entries || [];
+
+  // Mothers at the same address are the point of the tool, so batches repeat
+  // addresses. Each distinct one is looked up once.
+  const inFlight = new Map();
+  const keyFor = (entry) => typeof entry === 'string'
+    ? entry
+    : `${entry?.street || ''}|${entry?.neighborhood || ''}`;
+
+  return mapWithConcurrency(list, GEOCODE_CONCURRENCY, async (entry) => {
+    const rawStreet    = typeof entry === 'string' ? entry : (entry?.street || '');
+    const neighborhood = typeof entry === 'string' ? ''    : (entry?.neighborhood || '');
+    const key = keyFor(entry);
+    if (!inFlight.has(key)) inFlight.set(key, geocodeOne(entry));
+    try {
+      return await inFlight.get(key);
+    } catch (err) {
+      return { street: rawStreet, neighborhood, precise: false, error: err.message };
+    }
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -602,28 +836,323 @@ async function transitMinutes(from, to, departure = representativeDeparture()) {
 }
 
 // ---------------------------------------------------------------------------
-// Isochrones — OpenRouteService v2
+// Meeting venues, from OpenStreetMap
 // ---------------------------------------------------------------------------
-const ORS_PROFILE = { W: 'foot-walking', B: 'cycling-regular', D: 'driving-car' };
+// Digitransit's geocoder has a `venue` layer but returns no category, so a
+// search comes back with hairdressers and kebab shops and no way to tell them
+// apart. OpenStreetMap has the tags.
+const OVERPASS_URL = 'https://overpass-api.de/api/interpreter';
+const OVERPASS_USER_AGENT = 'village-matcher (janne.niutanen@cgi.com)';
 
-async function isochroneReq(locations, mode, minutes) {
-  const key     = process.env.ORS_API_KEY;
-  if (!key) throw new Error('ORS_API_KEY environment variable is not set');
-  const profile = ORS_PROFILE[mode] || 'driving-car';
+// Malls because of the winter: warm, free, a lift, and somewhere to feed a
+// baby.
+const OVERPASS_TAGS = [
+  ['leisure', 'playground'],
+  ['leisure', 'park'],
+  ['amenity', 'community_centre'],
+  ['shop', 'mall'],
+];
 
-  const resp = await fetch(`https://api.openrouteservice.org/v2/isochrones/${profile}`, {
+// Overpass is free and community-run, so results are cached for the life of
+// the process.
+const _venueCache = new Map();
+
+// Rounded, so nearby groups share one entry.
+function venueCacheKey(circle) {
+  return `${circle.lat.toFixed(2)},${circle.lon.toFixed(2)},${circle.radiusKm}`;
+}
+
+// Overpass sheds load when busy: the same query that answers in 2s can return
+// 504 minutes later. Normal operation for it, so retry and let the caller
+// carry on without venues if it stays down.
+async function overpassFetch(query, attempt = 0) {
+  const resp = await fetch(OVERPASS_URL, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'Authorization': key },
-    body: JSON.stringify({
-      locations:     locations.map(l => [l.lon, l.lat]),
-      range:         [minutes * 60],
-      intersections: true,
-    }),
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      // Overpass answers 406 Not Acceptable without one.
+      'User-Agent': OVERPASS_USER_AGENT,
+    },
+    body: new URLSearchParams({ data: query }),
   });
-  if (!resp.ok) {
-    throw new Error(`ORS returned HTTP ${resp.status}: ${(await resp.text()).slice(0, 200)}`);
+
+  if ((resp.status === 429 || resp.status >= 500) && attempt < 2) {
+    await sleep(1500 * (attempt + 1));
+    return overpassFetch(query, attempt + 1);
   }
-  return resp.json();
+  if (!resp.ok) throw new Error(`Overpass returned HTTP ${resp.status}`);
+
+  const data = await resp.json();
+  // Overpass reports its own timeouts in `remark` with HTTP 200 and no
+  // elements, which is otherwise indistinguishable from "nothing near here".
+  if (data.remark) throw new Error(`Overpass: ${String(data.remark).slice(0, 160)}`);
+  return data;
+}
+
+async function meetingVenues(circle) {
+  if (!circle || typeof circle.lat !== 'number' || typeof circle.lon !== 'number') return [];
+  const radiusKm = Math.min(Math.max(circle.radiusKm || 10, 1), 25);
+  const key = venueCacheKey({ ...circle, radiusKm });
+  if (_venueCache.has(key)) return _venueCache.get(key);
+
+  // A box, not Overpass's `around:`. That works for nodes but times out at 40s
+  // returning nothing once `way` elements are included, and parks and
+  // playgrounds are mapped as areas. The caller trims to the true radius.
+  const dLat = radiusKm / 111.32;
+  const dLon = radiusKm / (111.32 * Math.cos((circle.lat * Math.PI) / 180));
+  const bbox = [
+    circle.lat - dLat, circle.lon - dLon,
+    circle.lat + dLat, circle.lon + dLon,
+  ].map((n) => n.toFixed(5)).join(',');
+
+  // Nodes and ways both, since a playground is usually an area; `out center`
+  // reduces each to a point. Named only: two thirds have no name and filtering
+  // server-side cut the reply from 1688 elements to 644.
+  const clauses = OVERPASS_TAGS
+    .flatMap(([k, v]) => [`node["${k}"="${v}"]["name"](${bbox});`, `way["${k}"="${v}"]["name"](${bbox});`])
+    .join('\n  ');
+  const query = `[out:json][timeout:25];\n(\n  ${clauses}\n);\nout center tags;`;
+
+  const data = await overpassFetch(query);
+  const venues = (data.elements || []).map((el) => {
+    const tags = el.tags || {};
+    const centre = el.center || { lat: el.lat, lon: el.lon };
+    return {
+      id: `${el.type}/${el.id}`,
+      name: tags.name || tags['name:fi'] || null,
+      kind: tags.leisure || tags.amenity || tags.shop || null,
+      lat: centre?.lat,
+      lon: centre?.lon,
+    };
+  }).filter((v) => typeof v.lat === 'number' && typeof v.lon === 'number');
+
+  _venueCache.set(key, venues);
+  return venues;
+}
+
+// ---------------------------------------------------------------------------
+// Travel-time grid: many origins to many candidate points, in bulk
+// ---------------------------------------------------------------------------
+// This is what makes an accurate group overlap affordable. Asking the router
+// one journey per HTTP request, as travelTimeBatch does, costs a request per
+// member per candidate point: a 3x3 grid for four members is 36 round trips.
+// GraphQL will answer many aliased queries in a single request, so the same 36
+// journeys become 4 requests, one per member. Measured against the live
+// router: 8 real transit journeys in one request in 1.7s, 25 in 5.7s.
+//
+// Every journey is a real itinerary from the same router Reittiopas uses, with
+// real timetables, real walking legs to the stop and real waiting time. None
+// of it is modelled or interpolated.
+const GRID_MAX_POINTS_PER_REQUEST = 12;
+
+// One aliased planConnection per candidate point. Transit needs the scheduled
+// query; walking, cycling and driving are direct and leave immediately.
+function gridQuery(origin, points, departure) {
+  const mode = DIRECT_MODE[origin.mode];
+  const fields = origin.mode === 'P' ? 'duration start' : 'duration';
+  const modeArg = origin.mode === 'P' ? '' : `modes: { directOnly: true, direct: [${mode}] },`;
+
+  const aliases = points.map((point, i) => `p${i}: planConnection(
+    origin:      { location: { coordinate: { latitude: ${origin.lat}, longitude: ${origin.lon} } } },
+    destination: { location: { coordinate: { latitude: ${point.lat}, longitude: ${point.lon} } } },
+    dateTime:    { earliestDeparture: "${departure}" },
+    ${modeArg}
+    first: 1
+  ) { edges { node { ${fields} } } }`).join('\n');
+
+  return `{ ${aliases} }`;
+}
+
+async function gridChunk(origin, points, departure) {
+  const key = process.env.DIGITRANSIT_API_KEY;
+  if (!key) throw new Error('DIGITRANSIT_API_KEY environment variable is not set');
+  if (origin.mode !== 'P' && !DIRECT_MODE[origin.mode]) {
+    throw new Error(`Unknown transport mode '${origin.mode}'`);
+  }
+
+  const resp = await fetch('https://api.digitransit.fi/routing/v2/finland/gtfs/v1', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'digitransit-subscription-key': key },
+    body: JSON.stringify({ query: gridQuery(origin, points, departure) }),
+  });
+  if (!resp.ok) throw new Error(`Digitransit routing returned HTTP ${resp.status}`);
+
+  const data = await resp.json();
+  // GraphQL reports schema problems in `errors` with HTTP 200, and a whole
+  // aliased batch fails together, so this must be checked before reading.
+  if (data.errors?.length) throw new Error(`Digitransit routing: ${data.errors[0].message}`);
+
+  return points.map((_, i) => {
+    const node = data.data?.[`p${i}`]?.edges?.[0]?.node;
+    // null, not a large number: "no way to get there" is different in kind
+    // from "a long way", and the caller treats it as a hard exclusion.
+    if (!node) return null;
+    if (origin.mode !== 'P') return node.duration / 60;
+    // Waiting for the first departure is part of the journey as far as the
+    // traveller is concerned, exactly as in transitMinutes.
+    const waitMs = Math.max(0, new Date(node.start).getTime() - new Date(departure).getTime());
+    return node.duration / 60 + waitMs / 60000;
+  });
+}
+
+// origins: [{ id, lat, lon, mode }], points: [{ lat, lon }]
+// Returns { [originId]: [minutes | null, ...] } aligned with `points`.
+// Enough for a shortlist of venues plus every member's home, and a ceiling so
+// a mistake upstream cannot turn one click into hundreds of routing queries.
+const GRID_MAX_POINTS = 24;
+
+async function travelTimeGrid(origins, points) {
+  const departure = representativeDeparture();
+  const list = (points || []).slice(0, GRID_MAX_POINTS);
+  const out = {};
+
+  // Origins run in parallel, their own chunks in sequence. The router
+  // serializes work per key, so firing every chunk at once buys nothing and
+  // risks the documented 10 requests/second guidance.
+  await Promise.all((origins || []).map(async (origin) => {
+    const times = [];
+    for (let i = 0; i < list.length; i += GRID_MAX_POINTS_PER_REQUEST) {
+      const chunk = list.slice(i, i + GRID_MAX_POINTS_PER_REQUEST);
+      try {
+        times.push(...await gridChunk(origin, chunk, departure));
+      } catch (err) {
+        // One member's failure must not sink the whole grid; their points read
+        // as unreachable, which the scorer already handles.
+        console.warn(`[api] grid chunk failed for ${origin.id}: ${err.message}`);
+        times.push(...chunk.map(() => null));
+      }
+    }
+    out[origin.id] = times;
+  }));
+
+  return out;
+}
+
+// ---------------------------------------------------------------------------
+// Meeting places, cached in the sheet
+// ---------------------------------------------------------------------------
+// Working out where a group should meet costs an Overpass query and a routing
+// query per member per candidate place. Overpass is a free shared service that
+// sheds load, so the same lookup takes 3 seconds or 35 depending on the day.
+// The browser already caches within a session; this survives a reload, and for
+// an approved group it becomes the record of what was suggested.
+//
+// Keyed on the members rather than the candidate id, because candidate ids are
+// regenerated by every matching run while the key stays stable, and changes if
+// anyone's address or travel limit does.
+async function meetingRowIndex() {
+  const rows = await readRows(MEETING_TAB);
+  return { rows, hi: headerIndex(rows) };
+}
+
+function meetingRowIsFresh(cachedAt, groupId) {
+  if (groupId) return true;
+  if (!cachedAt) return false;
+  const ageDays = (Date.now() - new Date(cachedAt).getTime()) / 86400000;
+  return Number.isFinite(ageDays) && ageDays <= MEETING_CACHE_MAX_AGE_DAYS;
+}
+
+async function sheetGetMeetingPlaces() {
+  await ensureReady();
+  const { rows, hi } = await meetingRowIndex();
+  if (rows.length < 2) return {};
+
+  const out = {};
+  rows.slice(1).forEach((row) => {
+    const key = cellGet(row, hi, 'Key');
+    if (!key) return;
+    const groupId = cellGet(row, hi, 'Group ID') || null;
+    const cached  = cellGet(row, hi, 'Cached');
+    if (!meetingRowIsFresh(cached, groupId)) return;
+    try {
+      out[key] = { groupId, cached, places: JSON.parse(cellGet(row, hi, 'Places') || 'null') };
+    } catch {
+      // A hand-edited cell is not worth failing a sync over; it just misses.
+    }
+  });
+  return out;
+}
+
+async function sheetSaveMeetingPlaces(key, memberIds, places) {
+  await ensureReady();
+  if (!key) throw new Error('A meeting-place cache entry needs a key');
+  const payload = JSON.stringify(places ?? null);
+  // A sheet cell holds 50,000 characters. Skipping is better than failing the
+  // whole sync for something that is only a cache.
+  if (payload.length > 45000) return { cached: false, reason: 'too large to cache' };
+
+  const now = new Date().toISOString();
+  const { rows, hi } = await meetingRowIndex();
+  const rowIdx = rows.findIndex((r, i) => i > 0 && (r[hi['Key']] || '') === key);
+
+  if (rowIdx === -1) {
+    await getSheets().spreadsheets.values.append({
+      spreadsheetId: spreadsheetId(),
+      range: `'${MEETING_TAB}'!A:E`,
+      valueInputOption: 'RAW',
+      resource: { values: [[key, '', (memberIds || []).join(', '), payload, now]] },
+    });
+    return { cached: true };
+  }
+
+  const sheetRow = rowIdx + 1;
+  await getSheets().spreadsheets.values.batchUpdate({
+    spreadsheetId: spreadsheetId(),
+    resource: {
+      valueInputOption: 'RAW',
+      data: [
+        { range: `'${MEETING_TAB}'!${colLetter(hi['Places'])}${sheetRow}`, values: [[payload]] },
+        { range: `'${MEETING_TAB}'!${colLetter(hi['Cached'])}${sheetRow}`, values: [[now]] },
+      ],
+    },
+  });
+  return { cached: true };
+}
+
+// Approving a group claims its entry, which is what keeps it: from here on it
+// is that group's meeting places rather than a candidate's cache.
+async function sheetClaimMeetingPlaces(key, groupId) {
+  await ensureReady();
+  const { rows, hi } = await meetingRowIndex();
+  const rowIdx = rows.findIndex((r, i) => i > 0 && (r[hi['Key']] || '') === key);
+  if (rowIdx === -1) return { claimed: false };
+
+  await getSheets().spreadsheets.values.update({
+    spreadsheetId: spreadsheetId(),
+    range: `'${MEETING_TAB}'!${colLetter(hi['Group ID'])}${rowIdx + 1}`,
+    valueInputOption: 'RAW',
+    resource: { values: [[groupId || '']] },
+  });
+  return { claimed: true };
+}
+
+// Rejecting a group drops its entry. The row is deleted rather than blanked,
+// so the tab stays a list of live groups and candidates instead of growing a
+// tail of dead lookups.
+async function sheetDeleteMeetingPlaces(key) {
+  await ensureReady();
+  const { rows, hi } = await meetingRowIndex();
+  const rowIdx = rows.findIndex((r, i) => i > 0 && (r[hi['Key']] || '') === key);
+  if (rowIdx === -1) return { deleted: false };
+
+  const sheets = getSheets();
+  const meta = await sheets.spreadsheets.get({
+    spreadsheetId: spreadsheetId(), fields: 'sheets.properties(sheetId,title)',
+  });
+  const tab = meta.data.sheets.find((sh) => sh.properties.title === MEETING_TAB);
+  if (!tab) return { deleted: false };
+
+  await sheets.spreadsheets.batchUpdate({
+    spreadsheetId: spreadsheetId(),
+    resource: {
+      requests: [{
+        deleteDimension: {
+          range: { sheetId: tab.properties.sheetId, dimension: 'ROWS', startIndex: rowIdx, endIndex: rowIdx + 1 },
+        },
+      }],
+    },
+  });
+  return { deleted: true };
 }
 
 // ---------------------------------------------------------------------------
@@ -646,7 +1175,8 @@ async function dispatch(body) {
 
     case 'geocode':    return geocodeBatch(body.addresses);
     case 'travelTime': return travelTimeBatch(body.pairs);
-    case 'isochrone':  return isochroneReq(body.locations, body.mode, body.minutes);
+    case 'travelTimeGrid': return travelTimeGrid(body.origins, body.points);
+    case 'meetingVenues':  return meetingVenues(body.circle);
 
     case 'getApplicants':   return sheetGetApplicants();
     case 'updateApplicant': return sheetUpdateApplicant(body.id, body.fields);
@@ -657,6 +1187,11 @@ async function dispatch(body) {
     case 'saveTemplates':   return sheetSaveTemplates(body.templates);
     case 'getSettings':     return sheetGetSettings();
     case 'saveSettings':    return sheetSaveSettings(body.settings);
+
+    case 'getMeetingPlaces':    return sheetGetMeetingPlaces();
+    case 'saveMeetingPlaces':   return sheetSaveMeetingPlaces(body.key, body.memberIds, body.places);
+    case 'claimMeetingPlaces':  return sheetClaimMeetingPlaces(body.key, body.groupId);
+    case 'deleteMeetingPlaces': return sheetDeleteMeetingPlaces(body.key);
 
     default: throw new Error('Unknown action: ' + body.action);
   }

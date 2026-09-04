@@ -26,7 +26,6 @@ const path = require("path");
 const Validation = require("./src/validation.js");
 const MatchingEngine = require("./src/matching-engine.js");
 const Regions = require("./src/regions.js");
-const NEIGHBORHOOD_COORDS = Regions.DISTRICT_COORDS;
 
 // ---------------------------------------------------------------------------
 // Argument parsing — detect mode from the first argument
@@ -137,16 +136,25 @@ function fakeGeocode(entries) {
       return { street: rawStreet, neighborhood, queried: street, precise: false, error: "district not recognised" };
     }
     const h = stableHash(street + "|" + anchor.name);
+    // Every fourth address collides, so the map's shared-pin handling is
+    // exercised offline. It was not, and that shipped a bug.
+    const collide = h % 4 === 0;
+    const jitterLat = collide ? 0 : (((h % 1000) / 1000) - 0.5) * 0.01;
+    const jitterLon = collide ? 0 : ((((h >> 10) % 1000) / 1000) - 0.5) * 0.02;
     return {
       street: rawStreet,
       neighborhood,
       queried: street,
-      lat: anchor.coords[0] + (((h % 1000) / 1000) - 0.5) * 0.01,
-      lon: anchor.coords[1] + ((((h >> 10) % 1000) / 1000) - 0.5) * 0.02,
-      label: `${street}, ${anchor.name}`,
-      town: anchor.name,
+      lat: anchor.coords[0] + jitterLat,
+      lon: anchor.coords[1] + jitterLon,
+      label: `${street}, ${anchor.municipality || anchor.name}`,
+      town: anchor.municipality || anchor.name,
+      district: anchor.kind === "district" ? anchor.name : null,
+      municipality: anchor.municipality || anchor.name,
       confidence: 0.95,
       precise: true,
+      precision: "exact",
+      houseDelta: 0,
       _fake: true,
     };
   });
@@ -164,14 +172,55 @@ function fakeTravelTime(pairs) {
     return { id: p.id, minutes: Math.max(1, estimate * (1 + jitter)), _fake: true };
   });
 }
-function fakeIsochrone() {
-  return { type: "FeatureCollection", features: [], _fake: true, note: "local test server stub" };
+// Distance- and mode-aware for the same reason fakeTravelTime is: a stub that
+// ignored geography made the ranking of meeting places meaningless offline.
+function fakeTravelTimeGrid(origins, points) {
+  const out = {};
+  (origins || []).forEach((origin) => {
+    out[origin.id] = (points || []).map((point) => {
+      const km = MatchingEngine.haversineKm([origin.lat, origin.lon], [point.lat, point.lon]);
+      const estimate = MatchingEngine.estimateTravelTime(km, origin.mode);
+      if (!isFinite(estimate)) return null;
+      // The real router returns nothing for an impossible journey, and that is
+      // a hard exclusion downstream, so the stub has to be able to say it too.
+      if (origin.mode === "W" && km > 20) return null;
+      const jitter = ((stableHash(origin.id + point.lat) % 21) - 10) / 100; // ±10%
+      return Math.max(1, estimate * (1 + jitter));
+    });
+  });
+  return out;
+}
+
+const FAKE_VENUE_KINDS = ["playground", "park", "community_centre", "mall"];
+
+function fakeMeetingVenues(circle) {
+  if (!circle) return [];
+  const radiusDeg = (circle.radiusKm || 10) / 111.32;
+  const venues = [];
+  // Two rings, cycling through the kinds, so the round-robin shortlist and the
+  // separation rule are both exercised.
+  [0.35, 0.7].forEach((scale, band) => {
+    for (let i = 0; i < 8; i++) {
+      const angle = (i / 8) * 2 * Math.PI + band * 0.4;
+      const kind = FAKE_VENUE_KINDS[(i + band) % FAKE_VENUE_KINDS.length];
+      venues.push({
+        id: `fake/${band}/${i}`,
+        name: `Test ${kind.replace("_", " ")} ${band * 8 + i + 1}`,
+        kind,
+        lat: circle.lat + Math.sin(angle) * radiusDeg * scale,
+        lon: circle.lon + Math.cos(angle) * radiusDeg * scale * 2,
+        _fake: true,
+      });
+    }
+  });
+  return venues;
 }
 
 // ---------------------------------------------------------------------------
 // CSV mode — in-memory store seeded from a CSV file
 // ---------------------------------------------------------------------------
 let store = null;
+const meetingPlaceCache = {};
 
 function initCsvStore() {
   const csvRows = parseCsv(fs.readFileSync(csvPath, "utf8"));
@@ -521,7 +570,26 @@ async function dispatch(body) {
   if (action === "ping")       return { time: new Date().toISOString(), server: "local-test-server" + (isSheetMode ? " (Sheets API)" : " (CSV)") };
   if (action === "geocode")    return fakeGeocode(body.addresses);
   if (action === "travelTime") return fakeTravelTime(body.pairs);
-  if (action === "isochrone")  return fakeIsochrone();
+  if (action === "travelTimeGrid")  return fakeTravelTimeGrid(body.origins, body.points);
+  if (action === "meetingVenues")   return fakeMeetingVenues(body.circle);
+
+  // The sheet-backed meeting-place cache, in memory. Same lifecycle as the
+  // real one: saved on lookup, claimed on approval, deleted on rejection.
+  if (action === "getMeetingPlaces") return { ...meetingPlaceCache };
+  if (action === "saveMeetingPlaces") {
+    meetingPlaceCache[body.key] = { groupId: null, cached: new Date().toISOString(), places: body.places };
+    return { cached: true };
+  }
+  if (action === "claimMeetingPlaces") {
+    if (!meetingPlaceCache[body.key]) return { claimed: false };
+    meetingPlaceCache[body.key].groupId = body.groupId || null;
+    return { claimed: true };
+  }
+  if (action === "deleteMeetingPlaces") {
+    const had = Object.prototype.hasOwnProperty.call(meetingPlaceCache, body.key);
+    delete meetingPlaceCache[body.key];
+    return { deleted: had };
+  }
 
   if (isSheetMode) {
     switch (action) {
@@ -622,7 +690,10 @@ async function start() {
   });
 }
 
-start().catch((err) => { console.error(err); process.exit(1); });
+// So a test can import parseCsv without colliding with the server it spawned.
+if (require.main === module) {
+  start().catch((err) => { console.error(err); process.exit(1); });
+}
 
 // Exported for the smoke tests (CSV mode interface stays the same)
 module.exports = { dispatch, parseCsv };

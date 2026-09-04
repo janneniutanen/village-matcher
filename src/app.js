@@ -2,7 +2,7 @@
 //
 // Talks to the Netlify Function at /.netlify/functions/api for all
 // backend operations (Google Sheets read/write, geocoding, travel time,
-// isochrones). A password stored in localStorage is sent as
+// meeting-place suggestions). A password stored in localStorage is sent as
 // X-Matcher-Password on every request.
 //
 // For local development against local-test-server.js, append
@@ -48,6 +48,42 @@ function cacheGet(key) {
 }
 function cacheSet(key, value) {
   try { localStorage.setItem(key, JSON.stringify(value)); } catch { /* storage full */ }
+}
+
+// Not a timeout workaround; the backend runs locally. Chunking is so pins
+// appear as they resolve rather than after a silent minute, and so one failed
+// chunk costs ten people instead of everyone.
+const GEOCODE_CHUNK_SIZE = 10;
+
+const SYNC_BTN_LABEL = '\u21BB Sync with Google Sheet';
+
+// Passing null restores the button's normal label.
+function reportSyncProgress(text) {
+  const btn = document.getElementById('syncBtn');
+  if (btn) btn.textContent = text || SYNC_BTN_LABEL;
+}
+
+// Cached results never expire, which is right for an address, but it means a
+// coordinate the backend got WRONG is kept forever too. Bump this whenever a
+// change could alter what an address resolves to, or the fix never reaches a
+// browser holding the old answer.
+const GEOCODE_CACHE_VERSION = 'v2';
+const GEOCODE_CACHE_PREFIX  = `geocode:${GEOCODE_CACHE_VERSION}:`;
+
+function geocodeCacheKey(applicant) {
+  return `${GEOCODE_CACHE_PREFIX}${applicant.street}, ${applicant.neighborhood}`;
+}
+
+function pruneStaleGeocodeCache() {
+  try {
+    const stale = [];
+    for (let i = 0; i < localStorage.length; i++) {
+      const key = localStorage.key(i);
+      if (key && key.startsWith('geocode:') && !key.startsWith(GEOCODE_CACHE_PREFIX)) stale.push(key);
+    }
+    stale.forEach((key) => localStorage.removeItem(key));
+    if (stale.length) console.info(`Discarded ${stale.length} geocode result(s) from an older version.`);
+  } catch { /* storage unavailable */ }
 }
 
 // Fire-and-forget backend write. Local state is updated immediately so the
@@ -98,6 +134,12 @@ async function loadFromBackend_() {
         geocodedReal:  prev?.geocodedReal || false,
         geocodeLabel:  prev?.geocodeLabel || null,
         geocodeIssue:  prev?.geocodedReal ? null : 'Address not geocoded yet',
+        // A placed-but-imperfect match: right street and city, nearest known
+        // house number. Usable for matching, still worth the organizer seeing.
+        geocodeWarning: prev?.geocodeWarning || null,
+        // 'exact' | 'approximate' | 'street' | 'area'. Drives how the pin is
+        // drawn, so an area-centre guess doesn't look like a rooftop fix.
+        geocodePrecision: prev?.geocodePrecision || null,
       };
     });
     await ensureGeocoded(state.applicants);
@@ -133,7 +175,7 @@ const state = {
     neighborhoodFilter: 'all',
   },
   activeTab:         'new-matches',
-  overlapVisibleFor: null,
+  meetingPlacesFor: null,
   nextGroupNum:      1,
   usingBackendData:  false,
   travelTimeStats: null,
@@ -167,45 +209,58 @@ async function ensureGeocoded(applicants) {
 
   const toFetch = [];
   missing.forEach((a) => {
-    const cacheKey = 'geocode:' + a.street + ', ' + a.neighborhood;
-    const cached   = cacheGet(cacheKey);
+    const cached = cacheGet(geocodeCacheKey(a));
     if (cached && typeof cached.lat === 'number') {
-      a.coords      = [cached.lat, cached.lon];
-      a.geocodedReal = true;
+      a.coords         = [cached.lat, cached.lon];
+      a.geocodedReal   = true;
+      a.geocodeLabel   = cached.label || null;
+      a.geocodeIssue   = null;
+      a.geocodeWarning = cached.warning || null;
+      a.geocodePrecision = cached.precision || 'exact';
     } else {
       toFetch.push(a);
     }
   });
   if (toFetch.length === 0) return;
 
-  try {
-    // Structured, so the backend can anchor the search to the district rather
-    // than hoping the geocoder respects a municipality buried in free text.
-    const addresses = toFetch.map((a) => ({ street: a.street, neighborhood: a.neighborhood }));
-    const results   = await callBackend('geocode', { addresses });
-    results.forEach((r, i) => {
-      const a = toFetch[i];
-      a.geocodeLabel = r.label || null;
-      if (typeof r.lat === 'number' && r.precise) {
-        a.coords       = [r.lat, r.lon];
-        a.geocodedReal = true;
-        a.geocodeIssue = null;
-        cacheSet('geocode:' + a.street + ', ' + a.neighborhood, r);
-      } else {
-        // Either nothing was found, or the geocoder only managed to place the
-        // address at street/city level. Say which, so the organizer can fix
-        // the row instead of wondering why the pin is in the wrong place.
-        a.coords       = null;
-        a.geocodedReal = false;
-        a.geocodeIssue = r.error
-          ? `Address not found: ${r.error}`
-          : `Address only matched loosely${r.label ? ` (got "${r.label}")` : ''} — needs a more exact street address`;
-      }
-    });
-  } catch (err) {
-    console.warn('Geocoding call failed:', err.message);
-    toFetch.forEach((a) => { a.geocodeIssue = `Geocoding unavailable: ${err.message}`; });
+  // Sequential, not parallel: the backend rate-limits per process, so
+  // concurrent chunks would just multiply the request rate.
+  for (let start = 0; start < toFetch.length; start += GEOCODE_CHUNK_SIZE) {
+    const chunk = toFetch.slice(start, start + GEOCODE_CHUNK_SIZE);
+    reportSyncProgress(`Placing addresses… ${start} of ${toFetch.length}`);
+    try {
+      // Structured, so the backend can anchor the search to the district rather
+      // than hoping the geocoder respects a municipality buried in free text.
+      const addresses = chunk.map((a) => ({ street: a.street, neighborhood: a.neighborhood }));
+      const results   = await callBackend('geocode', { addresses });
+      results.forEach((r, i) => applyGeocodeResult(chunk[i], r));
+    } catch (err) {
+      // One failed chunk must not abandon the rest.
+      console.warn(`Geocoding chunk ${start}-${start + chunk.length} failed:`, err.message);
+      chunk.forEach((a) => { a.geocodeIssue = `Geocoding unavailable: ${err.message}`; });
+    }
   }
+  reportSyncProgress(null);
+}
+
+function applyGeocodeResult(a, r) {
+  a.geocodeLabel = r.label || null;
+  if (typeof r.lat === 'number' && r.precise) {
+    a.coords         = [r.lat, r.lon];
+    a.geocodedReal   = true;
+    a.geocodeIssue   = null;
+    a.geocodeWarning = r.warning || null;
+    a.geocodePrecision = r.precision || 'exact';
+    cacheSet(geocodeCacheKey(a), r);
+    return;
+  }
+
+  a.coords         = null;
+  a.geocodedReal   = false;
+  a.geocodeWarning = null;
+  a.geocodeIssue   = r.error
+    ? `Address not found: ${r.error}`
+    : `Address only matched loosely${r.label ? ` (got "${r.label}")` : ''}, so it needs a more exact street address`;
 }
 
 async function ensureTravelTimes(pairsNeeded) {
@@ -346,11 +401,28 @@ async function approveGroup(candidateId) {
     a.matchGroupId = groupId;
     syncToBackend('updateApplicant', { id, fields: { matchStatus: 'match_found', matchGroupId: groupId } });
   });
+  // The group exists now, so its suggestions stop being a candidate's cache
+  // and become the record of where this group was told to meet.
+  const meetingKeyForGroup = meetingCacheKey(meetingMembers(cand));
+  if (sheetMeetingCache?.[meetingKeyForGroup]) sheetMeetingCache[meetingKeyForGroup].groupId = groupId;
+  syncToBackend('claimMeetingPlaces', { key: meetingKeyForGroup, groupId });
+
   state.candidateGroups = state.candidateGroups.filter((c) => c.candidateId !== candidateId);
   renderAll();
 }
 
 function rejectGroup(candidateId) {
+  const cand = state.candidateGroups.find((c) => c.candidateId === candidateId);
+
+  // This group will not happen, so its suggestions are worth nothing. Dropped
+  // from the sheet rather than left to accumulate.
+  if (cand) {
+    const key = meetingCacheKey(meetingMembers(cand));
+    meetingCache.delete(key);
+    if (sheetMeetingCache) delete sheetMeetingCache[key];
+    syncToBackend('deleteMeetingPlaces', { key });
+  }
+
   state.candidateGroups = state.candidateGroups.filter((c) => c.candidateId !== candidateId);
   renderAll();
 }
@@ -400,13 +472,24 @@ function escHtml(str) {
     .replace(/"/g, '&quot;').replace(/'/g, '&#x27;');
 }
 
-let map, overlapLayer, pinLayer;
+let map, meetingLayer, pinLayer, highlightLayer;
+
+// Rebuilt on every renderMap.
+let markerForApplicant = new Map();
+// So a re-render does not yank the map back from wherever it was panned.
+let mapFramed = false;
+// Held across renders, or approving a group drops the ring silently.
+let selectedApplicantId = null;
 
 function initMap() {
-  map = L.map('map', { zoomControl: false, attributionControl: false }).setView([60.185, 24.93], 12);
-  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 18 }).addTo(map);
-  overlapLayer = L.layerGroup().addTo(map);
-  pinLayer     = L.layerGroup().addTo(map);
+  // Placeholder only; renderMap fits the view to the actual pins. A hardcoded
+  // Helsinki view left a Tampere dataset off-screen.
+  map = L.map('map', { attributionControl: false }).setView([64.0, 26.0], 5);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19 }).addTo(map);
+  meetingLayer   = L.layerGroup().addTo(map);
+  pinLayer       = L.layerGroup().addTo(map);
+  // Above the pins, so a selection ring is never hidden under a dot.
+  highlightLayer = L.layerGroup().addTo(map);
 }
 
 const GROUP_COLORS = ['#3F6C51', '#C1622D', '#5B6EC9', '#B0447A', '#3F8F8F', '#8A7A3F'];
@@ -427,66 +510,500 @@ function applicantCandidateColor(applicantId) {
   return cand ? candidateColor(cand.candidateId) : null;
 }
 
-function renderMap() {
-  pinLayer.clearLayers();
-  state.applicants
-    .filter((a) => !a.hasDataIssues && a.geocodedReal && a.coords)
-    .forEach((a) => {
-      const groupColor = colorForGroup(a.matchGroupId) || applicantCandidateColor(a.id);
-      const isMatched  = !!groupColor;
-      const marker = L.circleMarker(a.coords, {
-        radius: 9, color: isMatched ? groupColor : '#8A8577', weight: 2,
-        fillColor: isMatched ? groupColor : '#FAF9F6',
-        fillOpacity: isMatched ? 0.9 : 0.5, dashArray: isMatched ? null : '3,2',
-      }).addTo(pinLayer);
-
-      const groupName = a.matchGroupId
-        ? escHtml(state.groups.find((g) => g.id === a.matchGroupId)?.name ?? '')
-        : '';
-      marker.bindPopup(
-        `<strong>${escHtml(a.id)}</strong><br/>`+
-        `${escHtml(a.name)}<br/>`+
-        `${escHtml(a.street + ", " + a.neighborhood)}<br>` +
-        `${a.language.map(escHtml).join(', ')}<br>` +
-        `${a.transport.map(escHtml).join('')} ${a.maxTravel}<br>` +
-        `${a.matchGroupId ? 'Group: ' + groupName : 'Status: ' + escHtml(a.matchStatus)}`
-      );
-    });
+// Five decimals is about a metre, so anyone sharing an entrance.
+function pinKey(coords) {
+  return coords[0].toFixed(5) + ',' + coords[1].toFixed(5);
 }
 
-async function drawOverlap(candidateId) {
-  overlapLayer.clearLayers();
+// Two mothers in one building used to be two markers on the same pixel, so
+// the second was invisible: 17 applicants showed as 7 dots.
+function groupApplicantsByLocation(applicants) {
+  const spots = new Map();
+  applicants.forEach((a) => {
+    const key = pinKey(a.coords);
+    if (!spots.has(key)) spots.set(key, { coords: a.coords, people: [] });
+    spots.get(key).people.push(a);
+  });
+  return [...spots.values()];
+}
+
+function applicantPopupHtml(a) {
+  const groupName = a.matchGroupId
+    ? escHtml(state.groups.find((g) => g.id === a.matchGroupId)?.name ?? '')
+    : '';
+  return `<strong>${escHtml(a.id)}</strong> ${escHtml(a.name)}` +
+    `${a.expecting ? ' (expecting)' : ''}<br>` +
+    `${escHtml(a.street + ', ' + a.neighborhood)}<br>` +
+    `${a.language.map(escHtml).join(', ')}<br>` +
+    `${a.transport.map(escHtml).join('')} ${escHtml(a.maxTravel)}<br>` +
+    `${a.matchGroupId ? 'Group: ' + groupName : 'Status: ' + escHtml(a.matchStatus)}` +
+    (a.geocodeWarning ? `<br><em>${escHtml(a.geocodeWarning)}</em>` : '');
+}
+
+function renderMap() {
+  pinLayer.clearLayers();
+  highlightLayer.clearLayers();
+  markerForApplicant = new Map();
+
+  const placed = state.applicants.filter((a) => !a.hasDataIssues && a.geocodedReal && a.coords);
+
+  groupApplicantsByLocation(placed).forEach((spot) => {
+    const { coords, people } = spot;
+    // From whichever occupant is in a group, so a shared dot never looks
+    // unmatched when someone under it is matched.
+    const groupColor = people.map((a) => colorForGroup(a.matchGroupId) || applicantCandidateColor(a.id))
+                             .find(Boolean) || null;
+    const isMatched  = !!groupColor;
+    const shared     = people.length > 1;
+
+    // Drawn hollow and dashed, or a guess covering a whole district reads as
+    // a rooftop-accurate fix while scanning the map.
+    const approximate = people.every((a) => a.geocodePrecision === 'area');
+    const marker = L.circleMarker(coords, {
+      radius: shared ? 12 : 9,
+      color: isMatched ? groupColor : '#8A8577',
+      weight: shared ? 3 : 2,
+      fillColor: isMatched ? groupColor : '#FAF9F6',
+      fillOpacity: approximate ? 0.15 : (isMatched ? 0.9 : 0.5),
+      dashArray: approximate ? '2,3' : (isMatched ? null : '3,2'),
+    }).addTo(pinLayer);
+
+    if (shared) {
+      // Otherwise there is nothing to show that anyone is underneath.
+      marker.bindTooltip(String(people.length), {
+        permanent: true, direction: 'center', className: 'pin-count',
+      });
+    }
+
+    marker.bindPopup(
+      shared
+        ? `<strong>${people.length} people at this address</strong>` +
+          `<div class="pin-popup-list">${people.map(applicantPopupHtml).join('<hr>')}</div>`
+        : applicantPopupHtml(people[0]),
+      { maxHeight: 260 }
+    );
+
+    people.forEach((a) => markerForApplicant.set(a.id, marker));
+  });
+
+  frameMapAroundPins(placed);
+  // Re-draw the ring for whoever was selected. The layer was just cleared, and
+  // losing the highlight on every render made it useless as soon as anything
+  // else on the page changed.
+  if (selectedApplicantId) drawHighlightRing(selectedApplicantId);
+}
+
+function frameMapAroundPins(placed) {
+  if (mapFramed || placed.length === 0) return;
+  const bounds = L.latLngBounds(placed.map((a) => a.coords));
+  map.fitBounds(bounds, { padding: [40, 40], maxZoom: 14 });
+  mapFramed = true;
+}
+
+function drawHighlightRing(applicantId) {
+  const marker = markerForApplicant.get(applicantId);
+  if (!marker) return null;
+  L.circleMarker(marker.getLatLng(), {
+    radius: 20, color: '#C1622D', weight: 3, fill: false, className: 'pin-highlight',
+  }).addTo(highlightLayer);
+  return marker;
+}
+
+let markerForMeeting = new Map();
+
+// The answer to "where is this person" for someone under another dot.
+function focusApplicantOnMap(applicantId) {
+  highlightLayer.clearLayers();
+  if (!getApplicant(applicantId)) return false;
+
+  const marker = drawHighlightRing(applicantId);
+  if (!marker) return false;
+  selectedApplicantId = applicantId;
+
+  // Never zoom out from wherever the organizer already is.
+  map.setView(marker.getLatLng(), Math.max(map.getZoom(), 15), { animate: true });
+  marker.openPopup();
+  return true;
+}
+
+// Each venue costs a routing query per member, so this is the budget.
+const MEETING_SHORTLIST = 9;
+const MEETING_OPTIONS = 3;
+
+// Keyed by the members, so editing a group discards it. Backed by a sheet tab,
+// so it also survives a reload: the lookup costs an Overpass query plus a
+// routing query per member per place, and Overpass takes anywhere from 3 to 35
+// seconds depending on how loaded it is.
+const meetingCache = new Map();
+let sheetMeetingCache = null;
+
+function meetingCacheKey(members) {
+  return members.map((m) => `${m.id}:${m.coords}:${m.maxTravel}`).sort().join('|');
+}
+
+// The members a suggestion can actually be computed for. Extracted because
+// four callers need it and the cache key is built from it: if two of them
+// filtered differently the keys would differ and the cache would silently
+// miss every time.
+function meetingMembers(candidateGroup) {
+  return candidateGroup.memberIds.map(getApplicant).filter((m) => m.coords && m.transport.length);
+}
+
+// Loaded once per session, on the first request for suggestions, so a sync
+// that never opens a group pays nothing for this.
+async function sheetMeetingPlaces() {
+  if (sheetMeetingCache) return sheetMeetingCache;
+  try {
+    sheetMeetingCache = await callBackend('getMeetingPlaces', {});
+  } catch (err) {
+    console.warn('Could not read cached meeting places:', err.message);
+    sheetMeetingCache = {};
+  }
+  return sheetMeetingCache;
+}
+
+// The fastest mode she has. Deliberately not a mode the whole group shares:
+// requiring that made the old overlap useless, since one transit-only member
+// disabled measurement for everyone.
+function travelMode(applicant) {
+  return [...applicant.transport]
+    .sort((a, b) => MatchingEngine.MODE_MODEL[b].speedKmh - MatchingEngine.MODE_MODEL[a].speedKmh)[0];
+}
+
+async function findMeetingPoints(members) {
+  const circle = Reachability.venueSearchCircle(members);
+  const centre = [circle.lat, circle.lon];
+
+  // Free to offer, and a living room often beats a park.
+  let candidates = Reachability.homesAsVenues(members);
+
+  try {
+    const venues = await callBackend('meetingVenues', { circle });
+    candidates = candidates.concat(
+      Reachability.shortlistVenues(venues, centre, {
+        limit: MEETING_SHORTLIST, maxDistanceKm: circle.radiusKm,
+      })
+    );
+  } catch (err) {
+    // Overpass sheds load when busy. Fewer options, not no answer.
+    console.warn('Venue lookup failed, offering homes only:', err.message);
+  }
+
+  const times = await callBackend('travelTimeGrid', {
+    origins: members.map((m) => ({ id: m.id, lat: m.coords[0], lon: m.coords[1], mode: travelMode(m) })),
+    points:  candidates.map((v) => ({ lat: v.lat, lon: v.lon })),
+  });
+
+  return Reachability.scorePoints(candidates, times, members);
+}
+
+async function showMeetingPlaces(candidateId) {
+  meetingLayer.clearLayers();
+  // Toggling the suggestions off has to take the status line with it, or the
+  // last result sits there describing markers that are no longer on the map.
+  setMeetingStatus(null);
+  clearMeetingLists();
   if (!candidateId) return;
   const cand = state.candidateGroups.find((c) => c.candidateId === candidateId);
   if (!cand) return;
-  const members = cand.memberIds.map(getApplicant);
-  const color   = candidateColor(candidateId);
 
-  // Isochrones need a mode every member shares. Prefer driving over walking
-  // because it yields the larger, more useful overlap area.
-  const commonModes = members.reduce((acc, m) => acc.filter((mode) => m.transport.includes(mode)), ['D', 'W']);
-  const mode        = commonModes.includes('D') ? 'D' : commonModes.includes('W') ? 'W' : null;
+  const all      = cand.memberIds.map(getApplicant);
+  const members  = meetingMembers(cand);
+  const excluded = all.filter((m) => !m.coords || !m.transport.length);
 
-  if (mode && members.length <= 5) {
-    try {
-      const minutes   = Math.min(...members.map((m) => m.maxTravel));
-      const locations = members.map((m) => ({ lat: m.coords[0], lon: m.coords[1] }));
-      const geojson   = await callBackend('isochrone', { locations, mode, minutes });
-      L.geoJSON(geojson, { style: { color, weight: 1, fillColor: color, fillOpacity: 0.15 } }).addTo(overlapLayer);
-      return;
-    } catch (err) {
-      console.warn('Isochrone call failed, falling back to radius circles:', err.message);
+  if (members.length < 2) {
+    setMeetingStatus('Not enough of this group has a location and a way of travelling to work out where to meet.');
+    return;
+  }
+  // Silently leaving someone out would produce a meeting place that does not
+  // actually work for the whole group, which is worse than saying so.
+  const caveat = excluded.length
+    ? ` Not counting ${excluded.map((m) => m.name).join(', ')}, who ${excluded.length === 1 ? 'has' : 'have'} no usable location or transport.`
+    : '';
+  const color = candidateColor(candidateId);
+
+  const key = meetingCacheKey(members);
+  let scored = meetingCache.get(key);
+
+  if (!scored) {
+    const fromSheet = (await sheetMeetingPlaces())[key];
+    if (fromSheet?.places) {
+      scored = fromSheet.places;
+      meetingCache.set(key, scored);
     }
   }
 
-  members.forEach((a) => {
-    const bestSpeed = Math.max(...a.transport.map((m) => MatchingEngine.MODE_MODEL[m].speedKmh));
-    const radiusKm  = (a.maxTravel / 60) * bestSpeed;
-    L.circle(a.coords, { radius: radiusKm * 1000, color, weight: 1, fillColor: color, fillOpacity: 0.12 }).addTo(overlapLayer);
+  if (!scored) {
+    // Real itineraries, so this takes a few seconds.
+    setMeetingStatus('Finding places to meet and checking real travel times\u2026');
+    try {
+      scored = await findMeetingPoints(members);
+      meetingCache.set(key, scored);
+      cacheMeetingPlaces(key, members, scored);
+    } catch (err) {
+      console.warn('Meeting point search failed:', err.message);
+      setMeetingStatus(`Could not work out where to meet: ${err.message}`);
+      return;
+    }
+  }
+  renderMeetingPoints(scored, members, color, caveat);
+  renderMeetingList(candidateId, scored, members);
+}
+
+// The map answers "where", but the name and times get copied into a message,
+// and re-opening a popup for each option to compare them is painful. Ranked by
+// the same rule as the markers, so the two always agree.
+function renderMeetingList(candidateId, scored, members) {
+  const host = document.querySelector(`.meeting-list[data-meeting-for="${cssEscape(candidateId)}"]`);
+  if (!host) return;
+
+  const workable = Reachability.rankMeetingPoints(scored).slice(0, MEETING_OPTIONS);
+
+  if (!workable.length) {
+    const spread = Reachability.groupSpreadKm(members);
+    host.innerHTML = `<div class="meeting-empty">Nowhere works for everyone within their own travel limits. ` +
+      `These members live ${escHtml(spread.toFixed(1))}km apart.</div>`;
+    host.hidden = false;
+    return;
+  }
+
+  host.innerHTML = `<div class="meeting-list-head">Places everyone can reach</div>` +
+    workable.map((option, rank) => {
+      const rows = option.perMember.map((r) => {
+        const who = getApplicant(r.id);
+        const mode = who ? MODE_ICON[travelMode(who)] || '' : '';
+        return `<div class="meeting-leg"><span>${mode} ${escHtml(who ? who.name : r.id)}</span>` +
+          `<span>${Math.round(r.minutes)} min <span class="meeting-limit">of ${escHtml(r.limit)}</span></span></div>`;
+      }).join('');
+
+      return `<div class="meeting-option${rank === 0 ? ' meeting-option-best' : ''}" data-meeting-key="${escHtml(meetingKey(option))}">
+        <button class="meeting-option-head" type="button" aria-expanded="false">
+          <span class="meeting-icon">${VENUE_ICON[option.kind] || '\u{1F4CD}'}</span>
+          <span class="meeting-name">${escHtml(option.name)}</span>
+          <span class="meeting-kind">${escHtml(VENUE_LABEL[option.kind] || option.kind || 'place')}</span>
+          <span class="meeting-worst">${Math.round(option.worstMinutes)} min</span>
+        </button>
+        <div class="meeting-legs" hidden>${rows}
+          <button class="meeting-locate" type="button">Show on map</button>
+        </div>
+      </div>`;
+    }).join('');
+
+  host.hidden = false;
+
+  host.querySelectorAll('.meeting-option-head').forEach((head) => {
+    head.addEventListener('click', () => {
+      const legs = head.nextElementSibling;
+      const open = !legs.hidden;
+      legs.hidden = open;
+      head.setAttribute('aria-expanded', String(!open));
+    });
+  });
+
+  host.querySelectorAll('.meeting-locate').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const key = btn.closest('.meeting-option').dataset.meetingKey;
+      const marker = markerForMeeting.get(key);
+      if (!marker) return;
+      map.setView(marker.getLatLng(), Math.max(map.getZoom(), 14), { animate: true });
+      marker.openPopup();
+    });
   });
 }
 
+function clearMeetingLists() {
+  document.querySelectorAll('.meeting-list').forEach((el) => {
+    el.hidden = true;
+    el.innerHTML = '';
+  });
+}
+
+// Fire-and-forget, like the other sheet writes: the suggestions are already on
+// screen, and failing to cache them is not worth making her wait for.
+function cacheMeetingPlaces(key, members, places) {
+  const entry = { groupId: null, cached: new Date().toISOString(), places };
+  if (sheetMeetingCache) sheetMeetingCache[key] = entry;
+  syncToBackend('saveMeetingPlaces', { key, memberIds: members.map((m) => m.id), places });
+}
+
+function meetingKey(option) {
+  return `${option.lat.toFixed(5)},${option.lon.toFixed(5)}`;
+}
+
+function renderMeetingPoints(scored, members, color, caveat = '') {
+  markerForMeeting = new Map();
+  const workable = Reachability.rankMeetingPoints(scored).slice(0, MEETING_OPTIONS);
+
+  // Everyone in the pool is on this map, so without this the suggestion is
+  // lines reaching into an anonymous crowd of dots.
+  markActiveMembers(members, color);
+
+  if (!workable.length) {
+    // Still frame it: how far apart they are is the explanation.
+    frameGroup(members, []);
+    const near = Reachability.nearestMiss(scored);
+    const spread = Reachability.groupSpreadKm(members);
+    setMeetingStatus(
+      'No shared meeting place works for everyone within their stated travel limits. ' +
+      (near ? `The closest was ${near.name}, ${Math.round(Math.max(...near.perMember.map((r) => r.minutes)))} min for the furthest member. ` : '') +
+      `These members live ${spread.toFixed(1)}km apart.` + caveat
+    );
+    return;
+  }
+
+  // So it is visible who is being asked to travel furthest.
+  workable.forEach((option, rank) => {
+    const primary = rank === 0;
+
+    members.forEach((m) => {
+      const path = [m.coords, [option.lat, option.lon]];
+      // A pale casing under the coloured line. The group colours are dark by
+      // design and vanish into the basemap's greens and greys, and
+      // brightening them would lose the link to the group's pins.
+      L.polyline(path, {
+        color: '#FFFFFF',
+        weight: primary ? 7 : 5,
+        opacity: primary ? 0.9 : 0.55,
+        lineCap: 'round',
+      }).addTo(meetingLayer);
+
+      L.polyline(path, {
+        color,
+        weight: primary ? 3.5 : 2,
+        opacity: primary ? 1 : 0.65,
+        dashArray: primary ? null : '5,5',
+        lineCap: 'round',
+      }).addTo(meetingLayer);
+    });
+
+    // Square, unlike the round pins that mean people.
+    const marker = L.marker([option.lat, option.lon], {
+      icon: L.divIcon({
+        className: 'meeting-marker' + (primary ? ' meeting-marker-best' : ''),
+        html: `<span style="border-color:${escHtml(color)}">${VENUE_ICON[option.kind] || '\u{1F4CD}'}</span>`,
+        iconSize: [26, 26],
+        iconAnchor: [13, 13],
+      }),
+    }).addTo(meetingLayer).bindPopup(meetingPopup(option, rank));
+    markerForMeeting.set(meetingKey(option), marker);
+  });
+
+  frameGroup(members, workable);
+
+  const best = workable[0];
+  setMeetingStatus(
+    `Best of ${workable.length}: ${best.name} (${Math.round(best.worstMinutes)} min for whoever travels furthest). ` +
+    `Click a marker for each member's journey.` + caveat
+  );
+}
+
+// Dashed and wider than the pin inside, so it reads as a selection and is not
+// confused with the solid ring that marks one person picked from a list.
+function markActiveMembers(members, color) {
+  members.forEach((m) => {
+    L.circleMarker(m.coords, {
+      radius: 15, color, weight: 3, fill: false, dashArray: '4,3', opacity: 0.9,
+    }).addTo(meetingLayer);
+  });
+}
+
+// Without this the map stays framed over the whole pool, which for a national
+// dataset is hundreds of kilometres wide.
+function frameGroup(members, options) {
+  const points = [
+    ...members.map((m) => m.coords),
+    ...options.map((o) => [o.lat, o.lon]),
+  ];
+  if (!points.length) return;
+
+  // Overrides wherever it was panned: she just asked to see this group.
+  map.fitBounds(L.latLngBounds(points), { padding: [70, 70], maxZoom: 15 });
+  mapFramed = true;
+}
+
+const VENUE_ICON = {
+  playground:       '\u{1F6DD}',
+  park:             '\u{1F333}',
+  community_centre: '\u{1F3E4}',
+  mall:             '\u{1F6CD}',
+  home:             '\u{1F3E1}',
+};
+
+const VENUE_LABEL = {
+  playground:       'playground',
+  park:             'park',
+  community_centre: 'community centre',
+  mall:             'shopping centre',
+  home:             'a member\u2019s home',
+};
+
+function meetingPopup(option, rank) {
+  const rows = option.perMember.map((r) => {
+    const who  = getApplicant(r.id);
+    const mode = who ? MODE_ICON[travelMode(who)] || '' : '';
+    const time = r.minutes === null ? 'no route' : `${Math.round(r.minutes)} min`;
+    const over = r.minutes !== null && r.minutes > r.limit;
+    return `<div>${mode} ${escHtml(who ? who.name : r.id)} ` +
+      `<strong${over ? ' style="color:#B3261E"' : ''}>${time}</strong>` +
+      `<span style="opacity:.6"> of ${escHtml(r.limit)} min</span></div>`;
+  }).join('');
+
+  return `<strong>${escHtml(option.name)}</strong><br>` +
+    `<span style="opacity:.7">${escHtml(VENUE_LABEL[option.kind] || option.kind || 'place')}` +
+    `${rank === 0 ? ' \u00B7 best option' : ''}</span><br>` +
+    `Longest journey ${Math.round(option.worstMinutes)} min` +
+    `<div style="margin-top:5px">${rows}</div>`;
+}
+
+// Written next to the map legend, because this takes a few seconds and can
+// legitimately come back empty. Both need saying somewhere visible.
+function setMeetingStatus(text) {
+  const el = document.getElementById('meetingStatus');
+  if (!el) return;
+  el.textContent = text || '';
+  el.hidden = !text;
+}
+
 const MODE_ICON = { W: '🚶', D: '🚙', P: '🚌', B: '🚲' };
+const MODE_LABEL = { W: 'walk', D: 'car', P: 'public transport', B: 'bicycle' };
+
+// A flag per language, for the compact summary on an applicant row. Only
+// languages with one widely-understood country association are listed. Arabic
+// and Kurdish are spoken across many countries and by people from many more,
+// so choosing a flag for them would state something false about the person;
+// those fall through to their name in text, which is the honest answer.
+const FLAG_MAP = {
+  Finnish: '\u{1F1EB}\u{1F1EE}', English: '\u{1F1EC}\u{1F1E7}', Swedish: '\u{1F1F8}\u{1F1EA}',
+  Russian: '\u{1F1F7}\u{1F1FA}', Ukrainian: '\u{1F1FA}\u{1F1E6}', Estonian: '\u{1F1EA}\u{1F1EA}',
+  Polish: '\u{1F1F5}\u{1F1F1}', Romanian: '\u{1F1F7}\u{1F1F4}', Turkish: '\u{1F1F9}\u{1F1F7}',
+  Somali: '\u{1F1F8}\u{1F1F4}', Vietnamese: '\u{1F1FB}\u{1F1F3}', Thai: '\u{1F1F9}\u{1F1ED}',
+  Chinese: '\u{1F1E8}\u{1F1F3}', Japanese: '\u{1F1EF}\u{1F1F5}', Hindi: '\u{1F1EE}\u{1F1F3}',
+  Bengali: '\u{1F1E7}\u{1F1E9}', Nepali: '\u{1F1F3}\u{1F1F5}', Tagalog: '\u{1F1F5}\u{1F1ED}',
+  Spanish: '\u{1F1EA}\u{1F1F8}', Portuguese: '\u{1F1F5}\u{1F1F9}', French: '\u{1F1EB}\u{1F1F7}',
+  Italian: '\u{1F1EE}\u{1F1F9}', German: '\u{1F1E9}\u{1F1EA}', Farsi: '\u{1F1EE}\u{1F1F7}',
+  Persian: '\u{1F1EE}\u{1F1F7}',
+};
+
+// The compact line that used to sit on every applicant row and disappeared
+// with the village rewrite: which languages she speaks, how she travels, and
+// how far she will go. Emoji alone are ambiguous and say nothing to a screen
+// reader, so the cluster carries the same information as text in its title.
+function applicantTags(a) {
+  const flags = a.language.map((l) => FLAG_MAP[l] || `<span class="tag-word">${escHtml(l)}</span>`).join('');
+  const modes = a.transport.map((m) => MODE_ICON[m] || escHtml(m)).join('');
+  const travel = a.maxTravel || a.maxTravel === 0 ? `${escHtml(a.maxTravel)} min` : '';
+  const title = [
+    a.language.length ? `Speaks ${a.language.join(', ')}` : '',
+    a.transport.length ? `Travels by ${a.transport.map((m) => MODE_LABEL[m] || m).join(', ')}` : '',
+    travel ? `up to ${a.maxTravel} min` : '',
+  ].filter(Boolean).join(' \u00B7 ');
+
+  if (!flags && !modes && !travel) return '';
+  return `<span class="applicant-tags" title="${escHtml(title)}">${flags}` +
+    `${modes ? `<span class="tag-modes">${modes}</span>` : ''}` +
+    `${travel ? `<span class="tag-travel">${travel}</span>` : ''}</span>`;
+}
+
 
 const SCORE_LABELS = {
   travel:   'Travel',
@@ -570,12 +1087,25 @@ function renderCandidateCards() {
       <div class="card-actions">
         <button data-action="approve" data-id="${escHtml(candidateGroup.candidateId)}">Approve</button>
         <button data-action="reject"  data-id="${escHtml(candidateGroup.candidateId)}">Reject</button>
-        <button data-action="overlap" data-id="${escHtml(candidateGroup.candidateId)}">View overlap on map</button>
-      </div>`;
+        <button data-action="meeting" data-id="${escHtml(candidateGroup.candidateId)}">Suggest where to meet</button>
+      </div>
+      <div class="meeting-list" data-meeting-for="${escHtml(candidateGroup.candidateId)}" hidden></div>`;
     container.appendChild(card);
   });
 
   attachApplicantDetailToggles(container);
+
+  // A group whose suggestions are open stays open across a re-render. The
+  // results are already cached, so this costs nothing and avoids the list
+  // disappearing whenever anything else on the page changes.
+  if (state.meetingPlacesFor) {
+    const shown = state.candidateGroups.find((c) => c.candidateId === state.meetingPlacesFor);
+    if (shown) {
+      const members = meetingMembers(shown);
+      const cached = meetingCache.get(meetingCacheKey(members));
+      if (cached) renderMeetingList(state.meetingPlacesFor, cached, members);
+    }
+  }
 
   container.querySelectorAll('button[data-action]').forEach((btn) => {
     btn.addEventListener('click', async () => {
@@ -583,9 +1113,18 @@ function renderCandidateCards() {
       const id = btn.dataset.id;
       if (btn.dataset.action === 'approve') { btn.disabled = true; await approveGroup(id); btn.disabled = false; }
       if (btn.dataset.action === 'reject')   rejectGroup(id);
-      if (btn.dataset.action === 'overlap') {
-        state.overlapVisibleFor = state.overlapVisibleFor === id ? null : id;
-        await drawOverlap(state.overlapVisibleFor);
+      if (btn.dataset.action === 'meeting') {
+        const opening = state.meetingPlacesFor !== id;
+        state.meetingPlacesFor = opening ? id : null;
+        // Finding places takes a few seconds on a cold group, so the button
+        // says what it is doing rather than looking like it ignored the click.
+        if (opening) { btn.disabled = true; btn.textContent = 'Looking\u2026'; }
+        try {
+          await showMeetingPlaces(state.meetingPlacesFor);
+        } finally {
+          btn.disabled = false;
+          btn.textContent = state.meetingPlacesFor === id ? 'Hide meeting places' : 'Suggest where to meet';
+        }
       }
     });
   });
@@ -625,17 +1164,33 @@ function applicantCard(a, mapColor) {
     ? `<span class="participant-map-dot" style="background:${escHtml(mapColor)}; border-color:${escHtml(mapColor)}" aria-label="Map dot color"></span>`
     : '';
 
+  // An expecting mother's date is a due date, not a birthday. Worth saying so
+  // on the row: it changes how the coordinator writes to her, and whether the
+  // group she lands in is one of newborns or one still waiting.
+  const expectingBadge = a.expecting ? ' <span class="badge badge-expecting">expecting</span>' : '';
+
+  // Only offer "show on map" to someone who actually has a pin; a disabled
+  // control on an un-geocoded row would just be a dead end.
+  const locatable = a.geocodedReal && a.coords;
+  const locateBtn = locatable
+    ? `<button class="locate-btn" type="button" data-locate="${escHtml(a.id)}" title="Show on map">📍</button>`
+    : '';
+
+  // The name, not the identity number. An organizer thinks in names, and the
+  // number told her nothing usable while scanning a list. It is still in the
+  // details, and still on the row as a data attribute for the map.
   return `
-    <div class="mini-card unmatched-card applicant-card">
+    <div class="mini-card unmatched-card applicant-card${locatable ? ' locatable' : ''}" data-applicant-id="${escHtml(a.id)}">
       <div class="unmatched-summary">
-        <span class="participant-id-wrap">${mapDot}<button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.id)}</button></span>
-        <span>${escHtml(a.name)} · ${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span>
-        <span>${a.geocodedReal && a.coords ? escHtml(a.coords) : '<em>no location</em>'}</span>
+        <span class="participant-id-wrap">${mapDot}<button class="id-toggle" type="button" aria-expanded="false">${escHtml(a.name || a.id)}</button>${expectingBadge}</span>
+        <span class="applicant-summary-line">${applicantTags(a)}<span class="applicant-address">${escHtml(a.street)}, ${escHtml(a.neighborhood)}</span></span>
+        <span class="applicant-locate">${a.geocodedReal && a.coords ? escHtml(a.coords) : '<em>no location</em>'}${locateBtn}</span>
       </div>
       <div class="applicant-details" hidden>
+        ${detailRow('Identity number', a.id)}
         ${detailRow('Name', a.name)}
         ${phoneRow()}
-        ${detailRow('Baby DOB', MatchingEngine.formatMonthYear(a.dob))}
+        ${detailRow(a.expecting ? 'Due' : 'Baby DOB', MatchingEngine.formatMonthYear(a.dob))}
         ${detailRow('Languages', a.language.join(', '))}
         ${detailRow('Transport', `${a.transport.join('')} ${a.maxTravel}`)}
         ${detailRow('Address', `${a.street}, ${a.neighborhood}`)}
@@ -660,6 +1215,35 @@ function attachApplicantDetailToggles(container) {
       btn.setAttribute('aria-expanded', String(!isOpen));
     });
   });
+
+  // Clicking a person anywhere on their row locates them on the map. The
+  // explicit pin button is there for discoverability; the whole-row handler is
+  // what the organizer actually reaches for. Buttons and links inside the row
+  // keep their own behaviour, so expanding details or opening WhatsApp still
+  // works.
+  container.querySelectorAll('.applicant-card.locatable').forEach((card) => {
+    card.addEventListener('click', (event) => {
+      if (event.target.closest('a')) return;
+      if (event.target.closest('button') && !event.target.closest('.locate-btn')) return;
+      selectApplicantOnMap(card.dataset.applicantId);
+    });
+  });
+}
+
+// Keeps the map selection and the list selection in step, so it is obvious
+// which row the ringed dot belongs to.
+function selectApplicantOnMap(applicantId) {
+  if (!applicantId) return;
+  document.querySelectorAll('.applicant-card.selected')
+    .forEach((el) => el.classList.remove('selected'));
+  document.querySelectorAll(`.applicant-card[data-applicant-id="${cssEscape(applicantId)}"]`)
+    .forEach((el) => el.classList.add('selected'));
+  focusApplicantOnMap(applicantId);
+}
+
+// Applicant ids come from a hand-edited sheet, so they can contain anything.
+function cssEscape(value) {
+  return window.CSS && CSS.escape ? CSS.escape(value) : String(value).replace(/["\\]/g, '\\$&');
 }
 
 function renderActiveGroups() {
@@ -717,9 +1301,23 @@ function renderDataIssues() {
     .map((a) => ({ a, issues: [...(a.hasDataIssues ? a.dataIssues : []), ...(a.geocodeIssue ? [a.geocodeIssue] : [])] }))
     .filter((r) => r.issues.length > 0);
 
-  container.innerHTML = flagged.length
-    ? flagged.map(({ a, issues }) => `<div class="mini-card issue-card"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}) — ${issues.map(escHtml).join('; ')}</span></div>`).join('')
+  // Placed, but not exactly where the sheet said. These are on the map and in
+  // the matching pool, so they are listed apart from the blocking issues;
+  // lumping them together would make the blocking list look longer than the
+  // number of people actually missing from the map.
+  const warned = state.applicants.filter((a) => !a.hasDataIssues && a.geocodedReal && a.geocodeWarning);
+
+  const blocking = flagged.length
+    ? flagged.map(({ a, issues }) => `<div class="mini-card issue-card" data-applicant-id="${escHtml(a.id)}"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}): ${issues.map(escHtml).join('; ')}</span></div>`).join('')
     : `<div class="empty-state">No data issues found in the current sheet.</div>`;
+
+  const approximate = warned.length
+    ? `<div class="issue-subhead">On the map, but worth checking (${warned.length})</div>` +
+      warned.map((a) => `<div class="mini-card warning-card applicant-card locatable" data-applicant-id="${escHtml(a.id)}"><span><strong>${escHtml(a.name)}</strong> (${escHtml(a.id)}): ${escHtml(a.geocodeWarning)}</span></div>`).join('')
+    : '';
+
+  container.innerHTML = blocking + approximate;
+  attachApplicantDetailToggles(container);
 }
 
 function renderSettingsTab() {
@@ -826,8 +1424,8 @@ function wireControls() {
     } catch (err) {
       alert('Matching couldn\'t complete: ' + err.message);
     }
-    state.overlapVisibleFor = null;
-    overlapLayer.clearLayers();
+    state.meetingPlacesFor = null;
+    meetingLayer.clearLayers();
     renderAll();
     btn.disabled = false; btn.textContent = '▶ Run matching';
   });
@@ -883,11 +1481,15 @@ function wireControls() {
     btn.disabled = true;
     btn.textContent = 'Syncing…';
     const success = await loadFromBackend();
+    // An explicit sync may bring in a different set of people entirely (a
+    // second city, or addresses just fixed in the sheet), so re-frame the map
+    // around whatever is there now instead of keeping the previous view.
+    mapFramed = false;
     populateNeighborhoodFilter();
     renderSettingsTab();
     renderAll();
     btn.disabled = false;
-    btn.textContent = '↻ Sync with Google Sheet';
+    btn.textContent = SYNC_BTN_LABEL;
     if (!success) alert('Sync failed — check your connection and try again.');
   });
 
@@ -899,6 +1501,9 @@ function wireControls() {
 }
 
 async function init() {
+  // Before anything reads the cache, so a coordinate cached by an older
+  // version of the geocoder can never reach the map.
+  pruneStaleGeocodeCache();
   initMap();
   wireControls();
 

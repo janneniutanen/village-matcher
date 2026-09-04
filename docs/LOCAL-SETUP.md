@@ -57,7 +57,7 @@ The tool reads and writes your sheet using a special service account
 
 ---
 
-## Step 4 — Get a free igitransit API key (geocoding)
+## Step 4 — Get a free Digitransit API key (geocoding)
 
 This key lets the tool place applicants on a map using real addresses.
 
@@ -71,21 +71,7 @@ This key lets the tool place applicants on a map using real addresses.
 
 ---
 
-## Step 5 — Get a free OpenRouteService API key (travel times)
-
-This key lets the tool calculate realistic travel times between applicants.
-
-1. Go to **[openrouteservice.org](https://openrouteservice.org)**
-2. Click **Get started** in the top-right corner → create a free account
-3. Check your email and confirm your account if asked
-4. After signing in, click **Dashboard** in the top menu
-5. Click **Request a token**, name it anything (e.g. `village-matcher`),
-   and click **Create Token**
-6. Copy the token shown — it's a long string of letters and numbers
-
----
-
-## Step 6 — Install Node.js (one-time)
+## Step 5 — Install Node.js (one-time)
 
 Node.js is a free program that runs the Village Matcher server on your Mac.
 You only need to install it once.
@@ -98,7 +84,7 @@ You only need to install it once.
 
 ---
 
-## Step 7 — Create the configuration file
+## Step 6 — Create the configuration file
 
 You'll fill in a configuration file called `.env` inside the project folder.
 This file holds your credentials — keep it private.
@@ -120,7 +106,6 @@ fields ready for you.
    SPREADSHEET_ID=paste-your-sheet-id-here
    SOURCE_TAB=Form Responses 1
    DIGITRANSIT_API_KEY=paste-your-digitransit-key-here
-   ORS_API_KEY=paste-your-openrouteservice-token-here
    GOOGLE_SERVICE_ACCOUNT_KEY_FILE=village-matcher-e25c4fc9e213.json
    ```
 
@@ -129,7 +114,6 @@ fields ready for you.
    - `SPREADSHEET_ID` — the ID you copied in Step 1
    - `SOURCE_TAB` — the exact tab name from Step 2
    - `DIGITRANSIT_API_KEY` — the key from Step 4
-   - `ORS_API_KEY` — the token from Step 5
    - `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` — the filename of the `.json` key
      file your developer sent (make sure this file is inside the project
      folder)
@@ -141,12 +125,12 @@ fields ready for you.
    dot?", click **Use "."**
 
 > **Tip:** If TextEdit keeps adding `.txt`, you can instead open Terminal
-> and run `nano .env` from the project folder (see Step 9 for how to open
+> and run `nano .env` from the project folder (see Step 8 for how to open
 > Terminal in the right folder).
 
 ---
 
-## Step 8 — Install dependencies (one-time)
+## Step 7 — Install dependencies (one-time)
 
 1. Open **Finder** and navigate to the project folder
 2. Open **Terminal**: press **Command+Space**, type **Terminal**, press Enter
@@ -165,12 +149,12 @@ You only need to do this once. If you move the project folder, run
 
 ---
 
-## Step 9 — Start the tool
+## Step 8 — Start the tool
 
 Each time you want to use Village Matcher:
 
 1. Open **Terminal** and navigate to the project folder (drag the folder
-   onto the Terminal window, as in Step 8)
+   onto the Terminal window, as in Step 7)
 2. Type the following and press Enter:
    ```
    node server.js
@@ -212,8 +196,8 @@ script:
 
 | What you see | What to do |
 |---|---|
-| "command not found: node" | Node.js isn't installed — repeat Step 6 |
-| "Cannot find module" | Run `npm install` from the project folder (Step 8) |
+| "command not found: node" | Node.js isn't installed — repeat Step 5 |
+| "Cannot find module" | Run `npm install` from the project folder (Step 7) |
 | "Incorrect password" | Re-check `MATCHER_PASSWORD` in your `.env` file |
 | "Tab X not found" | Re-check `SOURCE_TAB` — must match the sheet tab name exactly |
 | "No service account credentials found" | Make sure `GOOGLE_SERVICE_ACCOUNT_KEY_FILE` in `.env` matches the exact filename of the `.json` key file, and that the file is in the project folder |

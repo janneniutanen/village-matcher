@@ -13,6 +13,7 @@
 const http = require('http');
 const fs   = require('fs');
 const path = require('path');
+const zlib = require('zlib');
 
 // ---------------------------------------------------------------------------
 // Load .env (does not override variables already set in the environment)
@@ -46,6 +47,61 @@ const MIME = {
   '.svg':  'image/svg+xml',
   '.csv':  'text/csv',
 };
+
+// ---------------------------------------------------------------------------
+// Static assets: compressed once, then held in memory
+// ---------------------------------------------------------------------------
+// The frontend ships as plain source with no build step, so compression
+// happens here instead of in a bundler. Measured on the four browser scripts:
+// 99,351 bytes as written, 32,003 gzipped, 16,465 with comments stripped then
+// brotli. Cached against mtime, so editing a file is still picked up.
+const COMPRESSIBLE = new Set(['.js', '.css', '.html', '.json', '.svg', '.csv']);
+const assetCache = new Map();
+
+// Whole lines only, never mid-line, so a `//` in a string or regex is safe
+// without a tokenizer.
+//
+// Blank lines are kept on purpose: inside app.js's HTML templates a blank line
+// is content, so dropping it would change the markup while still parsing, and
+// no parse check would catch that. It saved 94 bytes after brotli.
+function stripComments(source) {
+  return source
+    .split('\n')
+    .filter((line) => {
+      const t = line.trim();
+      return !t.startsWith('//') && !t.startsWith('/*') && !t.startsWith('*');
+    })
+    .join('\n');
+}
+
+function leanJs(filePath, source) {
+  const lean = stripComments(source);
+  try {
+    new (require('vm').Script)(lean, { filename: filePath });
+    return lean;
+  } catch (err) {
+    console.warn(`[server] serving ${path.basename(filePath)} with comments: stripping them broke parsing (${err.message})`);
+    return source;
+  }
+}
+
+function buildAsset(filePath, ext) {
+  const stat = fs.statSync(filePath);
+  const key = `${filePath}:${stat.mtimeMs}:${stat.size}`;
+  const cached = assetCache.get(key);
+  if (cached) return cached;
+
+  let raw = fs.readFileSync(filePath);
+  if (ext === '.js') raw = Buffer.from(leanJs(filePath, raw.toString('utf8')), 'utf8');
+
+  const asset = { raw };
+  if (COMPRESSIBLE.has(ext)) {
+    asset.gzip = zlib.gzipSync(raw, { level: 9 });
+    asset.br = zlib.brotliCompressSync(raw);
+  }
+  assetCache.set(key, asset);
+  return asset;
+}
 
 // ---------------------------------------------------------------------------
 // HTTP server
@@ -89,21 +145,38 @@ const server = http.createServer((req, res) => {
   }
 
   try {
-    const data = fs.readFileSync(filePath);
-    const ext  = path.extname(filePath).toLowerCase();
-    res.writeHead(200, { 'Content-Type': MIME[ext] || 'application/octet-stream' });
-    res.end(data);
+    const ext = path.extname(filePath).toLowerCase();
+    const asset = buildAsset(filePath, ext);
+    const accepted = String(req.headers['accept-encoding'] || '');
+
+    let body = asset.raw;
+    let encoding = null;
+    if (asset.br && /\bbr\b/.test(accepted))          { body = asset.br;   encoding = 'br'; }
+    else if (asset.gzip && /\bgzip\b/.test(accepted)) { body = asset.gzip; encoding = 'gzip'; }
+
+    const headers = { 'Content-Type': MIME[ext] || 'application/octet-stream' };
+    if (encoding) {
+      headers['Content-Encoding'] = encoding;
+      headers['Vary'] = 'Accept-Encoding';
+    }
+    res.writeHead(200, headers);
+    res.end(body);
   } catch {
     res.writeHead(404, { 'Content-Type': 'text/plain' });
     res.end('Not found');
   }
 });
 
-server.listen(PORT, '127.0.0.1', () => {
-  console.log('');
-  console.log('  Village Matcher is running!');
-  console.log(`  Open this in your browser → http://localhost:${PORT}`);
-  console.log('');
-  console.log('  Press Ctrl+C to stop the server.');
-  console.log('');
-});
+// So the tests can import stripComments without binding a port.
+if (require.main === module) {
+  server.listen(PORT, '127.0.0.1', () => {
+    console.log('');
+    console.log('  Village Matcher is running!');
+    console.log(`  Open this in your browser → http://localhost:${PORT}`);
+    console.log('');
+    console.log('  Press Ctrl+C to stop the server.');
+    console.log('');
+  });
+}
+
+module.exports = { stripComments };

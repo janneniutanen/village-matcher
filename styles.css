@@ -175,6 +175,33 @@ button:hover { background: var(--surface-muted); }
 .legend-dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; margin-right: 5px; vertical-align: middle; }
 .legend-dot-solid { background: var(--accent); }
 .legend-dot-dashed { border: 2px dashed var(--text-muted); }
+/* Placed at the centre of a district because the sheet named a place rather
+   than an address. Matches the hollow, finely-dashed pin on the map. */
+.legend-dot-faint { border: 2px dashed var(--text-muted); opacity: 0.45; }
+/* A pin holding several people, which carries its count. */
+/* A member of the group whose meeting places are on screen. Dashed ring, to
+   read as a selection rather than as another person. */
+.legend-dot-active {
+  border: 2px dashed var(--accent);
+  background: transparent;
+}
+
+/* A suggested meeting place. Square, so it never reads as one of the round
+   pins that mean a person. */
+.legend-dot-meeting {
+  border: 2px solid var(--accent);
+  border-radius: 3px;
+  background: #fff;
+}
+.legend-dot-count {
+  background: var(--accent);
+  color: #fff;
+  font-size: 8px;
+  font-weight: 700;
+  font-style: normal;
+  line-height: 10px;
+  text-align: center;
+}
 
 .section-title {
   font-family: "Fraunces", serif;
@@ -209,6 +236,9 @@ button:hover { background: var(--surface-muted); }
   border-radius: 999px;
 }
 .badge-pending { background: var(--warning-bg); color: var(--warning-text); }
+/* A due date rather than a birthday. Deliberately quiet, because it is context for
+   the coordinator, not a problem to fix. */
+.badge-expecting { background: var(--surface-muted); color: var(--text-secondary); }
 .badge-score { background: var(--success-bg); color: var(--success-text); font-variant-numeric: tabular-nums; }
 
 .rank-badge {
@@ -332,6 +362,169 @@ button:hover { background: var(--surface-muted); }
 .issue-card {
   background: var(--danger-bg);
   color: var(--danger-text);
+}
+
+/* Placed on the map but not at the exact house number asked for. Amber
+   rather than red: these people are matched and visible, they just deserve
+   a glance. */
+.warning-card {
+  background: var(--warning-bg);
+  color: var(--warning-text);
+}
+.issue-subhead {
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin: 14px 0 6px;
+}
+
+/* --- Locating a person on the map ------------------------------------- */
+/* A whole applicant row is clickable, so it needs to look it. */
+.applicant-card.locatable { cursor: pointer; }
+.applicant-card.locatable:hover { background: var(--surface); box-shadow: inset 0 0 0 1px var(--border); }
+.applicant-card.selected {
+  box-shadow: inset 0 0 0 2px var(--accent);
+  background: var(--surface);
+}
+.applicant-locate { display: inline-flex; align-items: center; gap: 8px; white-space: nowrap; }
+
+/* The compact summary on an applicant row: languages, how she travels, how
+   far she will go. */
+.applicant-summary-line { display: inline-flex; align-items: baseline; gap: 10px; flex-wrap: wrap; min-width: 0; }
+.applicant-tags { display: inline-flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.applicant-tags .tag-word {
+  font-size: 11px;
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  padding: 0 4px;
+}
+.tag-modes { letter-spacing: 1px; }
+.tag-travel { font-size: 12px; color: var(--text-muted); font-variant-numeric: tabular-nums; }
+.applicant-address { color: var(--text-secondary); overflow: hidden; text-overflow: ellipsis; }
+.id-toggle { font-size: 13.5px; }
+.locate-btn {
+  border: none;
+  background: transparent;
+  padding: 0 2px;
+  font-size: 14px;
+  line-height: 1;
+  opacity: 0.55;
+}
+.applicant-card.locatable:hover .locate-btn,
+.applicant-card.selected .locate-btn { opacity: 1; }
+.locate-btn:hover { background: transparent; }
+
+/* Count drawn on a pin that holds more than one person. Without it, people
+   at the same address are hidden under each other with nothing to show it. */
+.pin-count {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  font-size: 10px;
+  font-weight: 700;
+  color: #fff;
+  text-shadow: 0 0 2px rgba(0, 0, 0, 0.6);
+}
+.pin-count::before { display: none; }
+/* Finding places takes a few seconds and can legitimately come back empty, so
+   it reports what happened instead of leaving the map unchanged. */
+.meeting-status {
+  font-size: 13px;
+  color: var(--text-secondary);
+  background: var(--surface-muted);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 8px 0 0;
+}
+.meeting-status[hidden] { display: none; }
+
+/* The suggestions repeated on the candidate card. The map answers "where";
+   this is what gets copied into a message. */
+.meeting-list { margin-top: 12px; border-top: 1px solid var(--border); padding-top: 10px; }
+.meeting-list[hidden] { display: none; }
+.meeting-list-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-secondary);
+  margin-bottom: 6px;
+}
+.meeting-empty { font-size: 13px; color: var(--text-secondary); }
+
+.meeting-option { border-radius: 8px; background: var(--surface-muted); margin-bottom: 6px; }
+.meeting-option-best { box-shadow: inset 0 0 0 1px var(--accent); }
+.meeting-option-head {
+  display: grid;
+  grid-template-columns: 20px 1fr auto auto;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  border: none;
+  background: transparent;
+  text-align: left;
+  padding: 8px 12px;
+  font-size: 13.5px;
+  color: var(--text);
+}
+.meeting-option-head:hover { background: var(--surface); }
+.meeting-icon { font-size: 14px; }
+.meeting-name { font-weight: 600; }
+.meeting-kind { font-size: 12px; color: var(--text-muted); }
+.meeting-worst {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--accent-dark);
+  font-variant-numeric: tabular-nums;
+}
+.meeting-legs { padding: 0 12px 10px 40px; }
+.meeting-legs[hidden] { display: none; }
+.meeting-leg {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+  color: var(--text-secondary);
+  padding: 2px 0;
+}
+.meeting-limit { color: var(--text-muted); }
+.meeting-locate {
+  margin-top: 6px;
+  font-size: 12px;
+  padding: 3px 10px;
+}
+
+/* Suggested meeting places on the map. Square and captioned with what kind of
+   place it is, so a suggestion is never mistaken for somebody's home. */
+.meeting-marker span {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  font-size: 14px;
+  background: #fff;
+  border: 2px solid var(--accent);
+  border-radius: 4px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+}
+.meeting-marker-best span {
+  width: 32px;
+  height: 32px;
+  margin: -3px;
+  font-size: 17px;
+  border-width: 3px;
+}
+
+.pin-popup-list { max-height: 200px; overflow-y: auto; }
+.pin-popup-list hr { border: none; border-top: 1px solid var(--border); margin: 6px 0; }
+
+/* The ring around the currently selected person. */
+.pin-highlight { animation: pin-pulse 1.4s ease-out 2; }
+@keyframes pin-pulse {
+  0%   { opacity: 1; }
+  50%  { opacity: 0.25; }
+  100% { opacity: 1; }
 }
 
 .hint { font-size: 13px; color: var(--text-secondary); margin-bottom: 16px; }

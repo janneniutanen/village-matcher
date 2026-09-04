@@ -71,28 +71,14 @@ This key lets the tool place applicants on a map using real addresses.
 
 ---
 
-## Step 5 — Get a free OpenRouteService API key (travel times)
-
-This key lets the tool calculate realistic travel times between applicants.
-
-1. Go to **[openrouteservice.org](https://openrouteservice.org)**
-2. Click **Get started** in the top-right corner → create a free account
-3. Check your email and confirm your account if asked
-4. After signing in, click **Dashboard** in the top menu
-5. Click **Request a token**
-6. Name it anything you like (e.g. `village-matcher`) and click **Create Token**
-7. Copy the token shown — it's a long string of letters and numbers
-
----
-
-## Step 6 — Choose an access password
+## Step 5 — Choose an access password
 
 Pick any password you'll use to log in to the Village Matcher tool. You're
 the only user, so it can be something simple but not obvious.
 
 ---
 
-## Step 7 — Add environment variables in Netlify
+## Step 6 — Add environment variables in Netlify
 
 This is where everything gets connected. You'll add six pieces of information
 as "environment variables" — a secure way Netlify stores private settings that
@@ -110,7 +96,7 @@ your tool can read.
 | Field | Value |
 |---|---|
 | Key | `MATCHER_PASSWORD` |
-| Value | The password you chose in Step 6 |
+| Value | The password you chose in Step 5 |
 
 ---
 
@@ -141,16 +127,7 @@ your tool can read.
 
 ---
 
-### Variable 5 — `ORS_API_KEY`
-
-| Field | Value |
-|---|---|
-| Key | `ORS_API_KEY` |
-| Value | The OpenRouteService token from Step 5 |
-
----
-
-### Variable 6 — `GOOGLE_SERVICE_ACCOUNT_JSON`
+### Variable 5 — `GOOGLE_SERVICE_ACCOUNT_JSON`
 
 This one contains the full contents of the `.json` file your developer sent.
 The file belongs to the service account
@@ -168,7 +145,7 @@ you shared the sheet with in Step 3.
 
 ---
 
-## Step 8 — Redeploy the site
+## Step 7 — Redeploy the site
 
 After adding all six variables:
 
@@ -179,10 +156,10 @@ After adding all six variables:
 
 ---
 
-## Step 9 — Test it
+## Step 8 — Test it
 
 1. Open your Village Matcher URL in the browser
-2. The tool will ask for your password — enter the one you set in Step 6
+2. The tool will ask for your password — enter the one you set in Step 5
 3. Click **Unlock**
 4. Go to **Templates & Settings** → click **Test connection**
 5. You should see a green ✓ with your sheet tab name

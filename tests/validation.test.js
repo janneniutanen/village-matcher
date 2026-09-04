@@ -197,7 +197,7 @@ test("normalizeApplicant: missing neighborhood/street/language/dob is fully flag
   };
   const result = Validation.normalizeApplicant(raw);
   assert.equal(result.eligibleForMatching, false);
-  ["neighborhood", "street", "language", "date of birth"].forEach((field) => {
+  ["neighborhood", "street", "language", "due date"].forEach((field) => {
     assert.ok(
       result.dataIssues.some((e) => e.toLowerCase().includes(field)),
       `expected an issue mentioning "${field}"`
@@ -209,4 +209,75 @@ test("normalizeApplicant: never throws even on a completely empty row", () => {
   assert.doesNotThrow(() => Validation.normalizeApplicant({}));
   const result = Validation.normalizeApplicant({});
   assert.equal(result.eligibleForMatching, false);
+});
+
+// ---------------------------------------------------------------------------
+// Expecting mothers. A village takes time to warm up and is needed most in
+// the first weeks, so mothers are matched before the birth and the date in
+// this column is a due date as often as a birthday.
+// ---------------------------------------------------------------------------
+
+// Built relative to today, because the accepted window is relative to today.
+function monthsFromNow(months, day = 15) {
+  const now = new Date();
+  return new Date(now.getFullYear(), now.getMonth() + months, day);
+}
+const asDDMMYYYY = (d) =>
+  `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()}`;
+
+test("parseDob: a due date across a whole pregnancy is accepted", () => {
+  // This used to cut off at two months ahead, which rejected any mother more
+  // than a trimester from her due date, including a real applicant.
+  [1, 3, 5, 7, 9].forEach((months) => {
+    const due = monthsFromNow(months);
+    assert.ok(
+      Validation.parseDob(asDDMMYYYY(due)) instanceof Date,
+      `a due date ${months} months out should be accepted (${asDDMMYYYY(due)})`
+    );
+  });
+});
+
+test("parseDob: a date beyond a possible pregnancy is still rejected", () => {
+  // The window has to stay tight enough to catch a mistyped year.
+  assert.equal(Validation.parseDob(asDDMMYYYY(monthsFromNow(14))), null);
+  assert.equal(Validation.parseDob("2205-07-10"), null);
+});
+
+test("parseDob: an already-born baby is still accepted", () => {
+  assert.ok(Validation.parseDob(asDDMMYYYY(monthsFromNow(-3))) instanceof Date);
+  assert.ok(Validation.parseDob(asDDMMYYYY(monthsFromNow(-30))) instanceof Date);
+  // But not a child well past the point of being a "youngest child".
+  assert.equal(Validation.parseDob(asDDMMYYYY(monthsFromNow(-72))), null);
+});
+
+test("isExpecting: distinguishes a due date from a birthday", () => {
+  assert.equal(Validation.isExpecting(monthsFromNow(4)), true);
+  assert.equal(Validation.isExpecting(monthsFromNow(-4)), false);
+  assert.equal(Validation.isExpecting(null), false);
+  assert.equal(Validation.isExpecting(new Date("nonsense")), false);
+});
+
+test("normalizeApplicant: an expecting mother is eligible and flagged as expecting", () => {
+  const due = monthsFromNow(5);
+  const applicant = Validation.normalizeApplicant({
+    id: "A900", name: "Aino", neighborhood: "Hervanta", street: "Insinöörinkatu 60",
+    transport: "bus", language: "Finnish, English", maxTravel: "30",
+    dob: asDDMMYYYY(due), phone: "0451234567",
+  });
+  assert.deepEqual(applicant.dataIssues, []);
+  assert.equal(applicant.eligibleForMatching, true);
+  assert.equal(applicant.expecting, true);
+});
+
+test("matching: two expecting mothers due a month apart are a month apart", () => {
+  // No special case is needed in the engine; it compares months between
+  // members, and that arithmetic works either side of today. This pins the
+  // property down so a future change can't quietly break it.
+  const MatchingEngine = require("../src/matching-engine.js");
+  const members = [{ dob: monthsFromNow(4) }, { dob: monthsFromNow(5) }];
+  assert.equal(MatchingEngine.ageRangeMonths(members), 1);
+
+  // And an expecting mother sits the right distance from a newborn.
+  const mixed = [{ dob: monthsFromNow(2) }, { dob: monthsFromNow(-1) }];
+  assert.equal(MatchingEngine.ageRangeMonths(mixed), 3);
 });

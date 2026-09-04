@@ -70,6 +70,15 @@ function parseLanguages(raw) {
   return result;
 }
 
+// A rolling application, so a "youngest child" can be a couple of years old by
+// the time a group forms.
+const DOB_MAX_YEARS_PAST = 5;
+
+// Mothers are matched before the birth on purpose, so this column holds a due
+// date as often as a birthday. Ten months covers a full pregnancy while still
+// catching a fat-finger year like "2205".
+const DOB_MAX_MONTHS_AHEAD = 10;
+
 // Accepts a JS Date, ISO "YYYY-MM-DD", "DD.MM.YYYY", or "DD/MM/YYYY". Returns a Date or null.
 // Note: both dot- and slash-separated formats are treated as DD/MM/YYYY
 // (Finnish convention), not MM/DD/YYYY (US convention).
@@ -98,15 +107,20 @@ function parseDob(raw) {
   }
   if (!d || isNaN(d.getTime())) return null;
 
-  // Sanity range: catches fat-finger year typos (e.g. "2205") without being
-  // strict about exact cutoffs — a rolling application means "youngest
-  // child" could occasionally be a couple of years old.
   const now = new Date();
-  const fiveYearsAgo = new Date(now.getFullYear() - 5, now.getMonth(), now.getDate());
-  const twoMonthsAhead = new Date(now.getFullYear(), now.getMonth() + 2, now.getDate());
-  if (d < fiveYearsAgo || d > twoMonthsAhead) return null;
+  const earliest = new Date(now.getFullYear() - DOB_MAX_YEARS_PAST, now.getMonth(), now.getDate());
+  const latest   = new Date(now.getFullYear(), now.getMonth() + DOB_MAX_MONTHS_AHEAD, now.getDate());
+  if (d < earliest || d > latest) return null;
 
   return d;
+}
+
+// A due date rather than a birthday. The matching engine needs no special case
+// (it compares months between members either side of today), but a coordinator
+// writing to someone does.
+function isExpecting(dob, now = new Date()) {
+  if (!(dob instanceof Date) || isNaN(dob.getTime())) return false;
+  return dob.getTime() > now.getTime();
 }
 
 // Nobody is realistically travelling more than three hours to a peer-support
@@ -212,7 +226,7 @@ function normalizeApplicant(raw) {
   if (maxTravel === null) errors.push(`Missing or invalid max travel time: ${invalidValue(raw.maxTravel)}`);
 
   const dob = parseDob(raw.dob);
-  if (dob === null) errors.push(`Missing or invalid date of birth (youngest child): ${invalidValue(raw.dob)}`);
+  if (dob === null) errors.push(`Missing or invalid birth date or due date: ${invalidValue(raw.dob)}`);
 
   const phone = normalizePhone(raw.phone);
   if (!isPlausiblePhone(phone)) errors.push(`Missing or invalid phone number: ${invalidValue(raw.phone)}`);
@@ -226,6 +240,7 @@ function normalizeApplicant(raw) {
     language,
     maxTravel,
     dob,
+    expecting: isExpecting(dob),
     phone: phone || "",
     hasDataIssues: errors.length > 0,
     dataIssues: errors,
@@ -245,6 +260,9 @@ const Validation = {
   parseTransport,
   parseLanguages,
   parseDob,
+  isExpecting,
+  DOB_MAX_YEARS_PAST,
+  DOB_MAX_MONTHS_AHEAD,
   parseMaxTravel,
   travelTextToMinutes,
   MAX_TRAVEL_MINUTES,
