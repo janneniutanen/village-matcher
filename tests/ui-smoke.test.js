@@ -849,3 +849,95 @@ test("stripComments: removes comment lines and nothing else", () => {
   // Blank lines are kept: inside a template literal they are content.
   assert.match(stripComments("a\n\nb"), /a\n\nb/);
 });
+
+// ---------------------------------------------------------------------------
+// The meeting-place cache. A lookup costs an Overpass query plus a routing
+// query per member per place, so it is cached in the sheet, kept when a group
+// is approved and dropped when one is rejected.
+// ---------------------------------------------------------------------------
+
+// Cache writes are fire-and-forget like the other sheet writes, so poll.
+async function waitForCache(window, expectedCount, describe, extra) {
+  const deadline = Date.now() + 4000;
+  let last = {};
+  while (Date.now() < deadline) {
+    last = await readCache(window);
+    const countOk = Object.keys(last).length === expectedCount;
+    if (countOk && (!extra || extra(last))) return last;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  assert.fail(`${describe} did not reach the sheet within 4s (got ${JSON.stringify(last)})`);
+  return last;
+}
+
+async function readCache(window) {
+  const resp = await fetch(baseUrl, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify({ action: "getMeetingPlaces" }),
+  });
+  return (await resp.json()).result;
+}
+
+test("UI smoke: a lookup is written to the sheet cache", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  assert.deepEqual(await readCache(window), {}, "nothing cached before the first lookup");
+
+  const group = await showFirstGroup(window);
+  const cached = await waitForCache(window, 1, "the lookup");
+
+  const [key] = Object.keys(cached);
+  const entry = cached[key];
+  assert.equal(entry.groupId, null, "a candidate's entry is not claimed yet");
+  assert.ok(Array.isArray(entry.places) && entry.places.length > 0);
+  // Keyed on the members, not the candidate id, which every matching run
+  // regenerates.
+  group.memberIds.forEach((id) => assert.match(key, new RegExp(id)));
+});
+
+test("UI smoke: a second look at the same group does not repeat the lookup", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const group = await showFirstGroup(window);
+  await waitForCache(window, 1, "the first lookup");
+
+  // A fresh page, so the in-memory cache is empty and only the sheet can help.
+  const reloaded = buildWindow();
+  await reloaded.__test__.init();
+  const groups = await reloaded.__test__.computeCandidateGroups();
+  reloaded.__test__.state.candidateGroups = groups;
+  reloaded.__test__.renderCandidateCards();
+
+  const before = await readCache(reloaded);
+  await reloaded.__test__.showMeetingPlaces(groups[0].candidateId);
+
+  const host = reloaded.document.querySelector(`.meeting-list[data-meeting-for="${groups[0].candidateId}"]`);
+  assert.ok(host.querySelectorAll(".meeting-option").length > 0, "served from the sheet");
+  assert.deepEqual(await readCache(reloaded), before, "and nothing was re-cached");
+});
+
+test("UI smoke: approving a group keeps its meeting places, tagged with the group", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const group = await showFirstGroup(window);
+  const [key] = Object.keys(await waitForCache(window, 1, "the lookup"));
+
+  await window.__test__.approveGroup(group.candidateId);
+  const groupId = window.__test__.state.groups[0].id;
+
+  const cached = await waitForCache(window, 1, "the claim", (c) => c[key]?.groupId === groupId);
+  assert.equal(cached[key].groupId, groupId, "kept, and now belongs to the group");
+  assert.ok(cached[key].places.length > 0);
+});
+
+test("UI smoke: rejecting a group removes its meeting places", async () => {
+  const window = buildWindow();
+  await window.__test__.init();
+  const group = await showFirstGroup(window);
+  await waitForCache(window, 1, "the lookup");
+
+  window.__test__.rejectGroup(group.candidateId);
+  const cached = await waitForCache(window, 0, "the deletion");
+  assert.deepEqual(cached, {}, "a group that will not happen leaves nothing behind");
+});

@@ -401,11 +401,28 @@ async function approveGroup(candidateId) {
     a.matchGroupId = groupId;
     syncToBackend('updateApplicant', { id, fields: { matchStatus: 'match_found', matchGroupId: groupId } });
   });
+  // The group exists now, so its suggestions stop being a candidate's cache
+  // and become the record of where this group was told to meet.
+  const meetingKeyForGroup = meetingCacheKey(meetingMembers(cand));
+  if (sheetMeetingCache?.[meetingKeyForGroup]) sheetMeetingCache[meetingKeyForGroup].groupId = groupId;
+  syncToBackend('claimMeetingPlaces', { key: meetingKeyForGroup, groupId });
+
   state.candidateGroups = state.candidateGroups.filter((c) => c.candidateId !== candidateId);
   renderAll();
 }
 
 function rejectGroup(candidateId) {
+  const cand = state.candidateGroups.find((c) => c.candidateId === candidateId);
+
+  // This group will not happen, so its suggestions are worth nothing. Dropped
+  // from the sheet rather than left to accumulate.
+  if (cand) {
+    const key = meetingCacheKey(meetingMembers(cand));
+    meetingCache.delete(key);
+    if (sheetMeetingCache) delete sheetMeetingCache[key];
+    syncToBackend('deleteMeetingPlaces', { key });
+  }
+
   state.candidateGroups = state.candidateGroups.filter((c) => c.candidateId !== candidateId);
   renderAll();
 }
@@ -613,11 +630,36 @@ function focusApplicantOnMap(applicantId) {
 const MEETING_SHORTLIST = 9;
 const MEETING_OPTIONS = 3;
 
-// Keyed by the members, so editing a group discards it.
+// Keyed by the members, so editing a group discards it. Backed by a sheet tab,
+// so it also survives a reload: the lookup costs an Overpass query plus a
+// routing query per member per place, and Overpass takes anywhere from 3 to 35
+// seconds depending on how loaded it is.
 const meetingCache = new Map();
+let sheetMeetingCache = null;
 
 function meetingCacheKey(members) {
   return members.map((m) => `${m.id}:${m.coords}:${m.maxTravel}`).sort().join('|');
+}
+
+// The members a suggestion can actually be computed for. Extracted because
+// four callers need it and the cache key is built from it: if two of them
+// filtered differently the keys would differ and the cache would silently
+// miss every time.
+function meetingMembers(candidateGroup) {
+  return candidateGroup.memberIds.map(getApplicant).filter((m) => m.coords && m.transport.length);
+}
+
+// Loaded once per session, on the first request for suggestions, so a sync
+// that never opens a group pays nothing for this.
+async function sheetMeetingPlaces() {
+  if (sheetMeetingCache) return sheetMeetingCache;
+  try {
+    sheetMeetingCache = await callBackend('getMeetingPlaces', {});
+  } catch (err) {
+    console.warn('Could not read cached meeting places:', err.message);
+    sheetMeetingCache = {};
+  }
+  return sheetMeetingCache;
 }
 
 // The fastest mode she has. Deliberately not a mode the whole group shares:
@@ -666,7 +708,7 @@ async function showMeetingPlaces(candidateId) {
   if (!cand) return;
 
   const all      = cand.memberIds.map(getApplicant);
-  const members  = all.filter((m) => m.coords && m.transport.length);
+  const members  = meetingMembers(cand);
   const excluded = all.filter((m) => !m.coords || !m.transport.length);
 
   if (members.length < 2) {
@@ -684,11 +726,20 @@ async function showMeetingPlaces(candidateId) {
   let scored = meetingCache.get(key);
 
   if (!scored) {
+    const fromSheet = (await sheetMeetingPlaces())[key];
+    if (fromSheet?.places) {
+      scored = fromSheet.places;
+      meetingCache.set(key, scored);
+    }
+  }
+
+  if (!scored) {
     // Real itineraries, so this takes a few seconds.
     setMeetingStatus('Finding places to meet and checking real travel times\u2026');
     try {
       scored = await findMeetingPoints(members);
       meetingCache.set(key, scored);
+      cacheMeetingPlaces(key, members, scored);
     } catch (err) {
       console.warn('Meeting point search failed:', err.message);
       setMeetingStatus(`Could not work out where to meet: ${err.message}`);
@@ -765,6 +816,14 @@ function clearMeetingLists() {
     el.hidden = true;
     el.innerHTML = '';
   });
+}
+
+// Fire-and-forget, like the other sheet writes: the suggestions are already on
+// screen, and failing to cache them is not worth making her wait for.
+function cacheMeetingPlaces(key, members, places) {
+  const entry = { groupId: null, cached: new Date().toISOString(), places };
+  if (sheetMeetingCache) sheetMeetingCache[key] = entry;
+  syncToBackend('saveMeetingPlaces', { key, memberIds: members.map((m) => m.id), places });
 }
 
 function meetingKey(option) {
@@ -1042,7 +1101,7 @@ function renderCandidateCards() {
   if (state.meetingPlacesFor) {
     const shown = state.candidateGroups.find((c) => c.candidateId === state.meetingPlacesFor);
     if (shown) {
-      const members = shown.memberIds.map(getApplicant).filter((m) => m.coords && m.transport.length);
+      const members = meetingMembers(shown);
       const cached = meetingCache.get(meetingCacheKey(members));
       if (cached) renderMeetingList(state.meetingPlacesFor, cached, members);
     }

@@ -220,6 +220,7 @@ function fakeMeetingVenues(circle) {
 // CSV mode — in-memory store seeded from a CSV file
 // ---------------------------------------------------------------------------
 let store = null;
+const meetingPlaceCache = {};
 
 function initCsvStore() {
   const csvRows = parseCsv(fs.readFileSync(csvPath, "utf8"));
@@ -571,6 +572,24 @@ async function dispatch(body) {
   if (action === "travelTime") return fakeTravelTime(body.pairs);
   if (action === "travelTimeGrid")  return fakeTravelTimeGrid(body.origins, body.points);
   if (action === "meetingVenues")   return fakeMeetingVenues(body.circle);
+
+  // The sheet-backed meeting-place cache, in memory. Same lifecycle as the
+  // real one: saved on lookup, claimed on approval, deleted on rejection.
+  if (action === "getMeetingPlaces") return { ...meetingPlaceCache };
+  if (action === "saveMeetingPlaces") {
+    meetingPlaceCache[body.key] = { groupId: null, cached: new Date().toISOString(), places: body.places };
+    return { cached: true };
+  }
+  if (action === "claimMeetingPlaces") {
+    if (!meetingPlaceCache[body.key]) return { claimed: false };
+    meetingPlaceCache[body.key].groupId = body.groupId || null;
+    return { claimed: true };
+  }
+  if (action === "deleteMeetingPlaces") {
+    const had = Object.prototype.hasOwnProperty.call(meetingPlaceCache, body.key);
+    delete meetingPlaceCache[body.key];
+    return { deleted: had };
+  }
 
   if (isSheetMode) {
     switch (action) {
